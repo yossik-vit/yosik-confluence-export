@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Conf Export Ext",
+  "version": "1.0.0",
+  "description": "A Chrome extension boilerplate with popup and background service worker.",
+  "permissions": [
+    "activeTab",
+    "downloads"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Conf Export Ext"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

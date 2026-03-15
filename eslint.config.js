@@ -4,6 +4,8 @@ const browserGlobals = {
   window: 'readonly',
   URL: 'readonly',
   Blob: 'readonly',
+  Uint8Array: 'readonly',
+  atob: 'readonly',
   fetch: 'readonly',
   console: 'readonly',
 };

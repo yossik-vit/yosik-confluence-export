@@ -22,4 +22,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     }
     return true;
   }
+  if (msg.action === 'create-blob-url') {
+    const binary = atob(msg.base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const blob = new Blob([bytes], { type: 'application/zip' });
+    sendResponse({ blobUrl: URL.createObjectURL(blob) });
+    return true;
+  }
+  if (msg.action === 'revoke-blob-url') {
+    URL.revokeObjectURL(msg.url);
+    sendResponse({ ok: true });
+    return true;
+  }
 });

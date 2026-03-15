@@ -58,8 +58,14 @@ async function triggerExportAndCapture(context, extensionId) {
   if (!sw) sw = await context.waitForEvent('serviceworker');
   await sw.evaluate(() => {
     globalThis.__capturedDownloads = [];
-    chrome.downloads.download = (opts) => {
-      globalThis.__capturedDownloads.push(opts);
+    chrome.downloads.download = async (opts) => {
+      const res = await fetch(opts.url);
+      const buffer = await res.arrayBuffer();
+      globalThis.__capturedDownloads.push({
+        url: opts.url,
+        filename: opts.filename,
+        data: Array.from(new Uint8Array(buffer)),
+      });
     };
   });
 
@@ -78,8 +84,7 @@ async function triggerExportAndCapture(context, extensionId) {
   const downloads = await sw.evaluate(() => globalThis.__capturedDownloads);
   const zips = [];
   for (const dl of downloads) {
-    const base64 = dl.url.replace('data:application/zip;base64,', '');
-    zips.push({ zip: await JSZip.loadAsync(Buffer.from(base64, 'base64')), filename: dl.filename });
+    zips.push({ zip: await JSZip.loadAsync(Buffer.from(dl.data)), filename: dl.filename, url: dl.url });
   }
 
   // For backward compat: return first zip as `zip` and `filename`
@@ -124,6 +129,12 @@ test.describe('Zip content verification', () => {
     await context.route(`${MOCK_BASE}/**`, buildMockRouter(PAGES, CONTENT));
     const { filename } = await triggerExportAndCapture(context, extensionId);
     expect(filename).toBe('Test-Space.zip');
+  });
+
+  test('download uses blob URL instead of data URL', async ({ context, extensionId }) => {
+    await context.route(`${MOCK_BASE}/**`, buildMockRouter(PAGES, CONTENT));
+    const { zips } = await triggerExportAndCapture(context, extensionId);
+    expect(zips[0].url).toMatch(/^blob:/);
   });
 
   test('zip has correct hierarchical folder structure', async ({ context, extensionId }) => {
@@ -221,7 +232,11 @@ test.describe('Zip content verification', () => {
     if (!sw) sw = await context.waitForEvent('serviceworker');
     await sw.evaluate(() => {
       globalThis.__capturedDownload = null;
-      chrome.downloads.download = (opts) => { globalThis.__capturedDownload = opts; };
+      chrome.downloads.download = async (opts) => {
+        const res = await fetch(opts.url);
+        await res.arrayBuffer();
+        globalThis.__capturedDownload = opts;
+      };
     });
 
     const popup = await context.newPage();
@@ -255,6 +270,92 @@ test.describe('Zip content verification', () => {
     expect(progress.shown).toBe(true);
     expect(progress.maxWidth).toBeGreaterThan(0);
     await expect(popup.locator('#progress-bar-wrap')).toBeHidden({ timeout: 500 });
+  });
+});
+
+test.describe('Error handling', () => {
+  test('shows session-expired error when content fetch returns 401', async ({ context, extensionId }) => {
+    // Mock router that returns 401 on individual page content fetch
+    await context.route(`${MOCK_BASE}/**`, async (route) => {
+      const url = new URL(route.request().url());
+
+      if (/^\/rest\/api\/space\//.test(url.pathname)) {
+        await route.fulfill({ json: { key: 'TEST', name: 'Test Space' } });
+      } else if (/^\/rest\/api\/content\/\d+$/.test(url.pathname)) {
+        await route.fulfill({ status: 401, json: { message: 'Unauthorized' } });
+      } else if (url.pathname === '/rest/api/content') {
+        await route.fulfill({ json: { results: SIMPLE_PAGES, _links: {} } });
+      } else {
+        await route.fulfill({ contentType: 'text/html', body: MOCK_CONFLUENCE_HTML });
+      }
+    });
+
+    const mockPage = await context.newPage();
+    await mockPage.goto(`${MOCK_BASE}/spaces/TEST/pages/100/Home`);
+
+    const popup = await context.newPage();
+    await popup.goto(`chrome-extension://${extensionId}/popup.html`);
+    await mockPage.bringToFront();
+
+    await popup.evaluate(() => document.getElementById('action-btn').click());
+
+    await expect(popup.locator('#status')).toHaveText(
+      'Session expired. Reload Confluence and retry.',
+      { timeout: 5000 },
+    );
+    await expect(popup.locator('#action-btn')).toBeEnabled({ timeout: 500 });
+    await expect(popup.locator('#progress-bar-wrap')).toBeHidden({ timeout: 500 });
+  });
+});
+
+test.describe('Cross-space and unknown links', () => {
+  test('preserves links to pages not in the exported space', async ({ context, extensionId }) => {
+    const pages = [
+      { id: '100', title: 'Home', ancestors: [] },
+    ];
+    const content = {
+      // Link to pageId 999 which is not in this space's page index
+      '100': '<h1>Home</h1>'
+        + '<p>See <a href="/spaces/OTHER/pages/999/External-Page">External Page</a></p>'
+        + '<p>And <a href="https://example.com">External Site</a></p>',
+    };
+
+    await context.route(`${MOCK_BASE}/**`, buildMockRouter(pages, content));
+    const { zip } = await triggerExportAndCapture(context, extensionId);
+
+    const homeMd = await zip.file('Home.md').async('string');
+    // Unknown pageId link should be preserved as original Confluence URL
+    expect(homeMd).toContain('/spaces/OTHER/pages/999/External-Page');
+    // External links should also be preserved
+    expect(homeMd).toContain('https://example.com');
+  });
+});
+
+test.describe('Duplicate-title pages', () => {
+  test('exports pages with identical titles using -2 suffix', async ({ context, extensionId }) => {
+    const pages = [
+      { id: '100', title: 'Home', ancestors: [] },
+      { id: '101', title: 'FAQ', ancestors: [{ id: '100', title: 'Home' }] },
+      { id: '102', title: 'FAQ', ancestors: [{ id: '100', title: 'Home' }] },
+    ];
+    const content = {
+      '100': '<h1>Home</h1><p>Welcome.</p>',
+      '101': '<h2>FAQ</h2><p>First FAQ page.</p>',
+      '102': '<h2>FAQ</h2><p>Second FAQ page.</p>',
+    };
+
+    await context.route(`${MOCK_BASE}/**`, buildMockRouter(pages, content));
+    const { zip } = await triggerExportAndCapture(context, extensionId);
+
+    const paths = Object.keys(zip.files).filter(p => p.endsWith('.md'));
+    expect(paths).toContain('Home/FAQ.md');
+    expect(paths).toContain('Home/FAQ-2.md');
+
+    // Verify both have distinct content
+    const faq1 = await zip.file('Home/FAQ.md').async('string');
+    const faq2 = await zip.file('Home/FAQ-2.md').async('string');
+    expect(faq1).toContain('First FAQ page');
+    expect(faq2).toContain('Second FAQ page');
   });
 });
 
@@ -303,7 +404,11 @@ test.describe('Chunked zip export', () => {
     await sw.evaluate(() => {
       globalThis.__capturedDownloads = [];
       globalThis.__swErrors = [];
-      chrome.downloads.download = (opts) => { globalThis.__capturedDownloads.push(opts); };
+      chrome.downloads.download = async (opts) => {
+        const res = await fetch(opts.url);
+        await res.arrayBuffer();
+        globalThis.__capturedDownloads.push(opts);
+      };
       self.addEventListener('error', (e) => { globalThis.__swErrors.push(e.message); });
       self.addEventListener('unhandledrejection', (e) => { globalThis.__swErrors.push(e.reason?.message ?? String(e.reason)); });
     });

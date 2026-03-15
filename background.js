@@ -165,8 +165,15 @@ const ZIP_CHUNK_SIZE = 50;
 
 async function triggerDownload(zip, filename) {
   const base64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE' });
-  const dataUrl = `data:application/zip;base64,${base64}`;
-  await chrome.downloads.download({ url: dataUrl, filename });
+  const { blobUrl } = await chrome.runtime.sendMessage({
+    action: 'create-blob-url',
+    base64,
+  });
+  try {
+    await chrome.downloads.download({ url: blobUrl, filename });
+  } finally {
+    chrome.runtime.sendMessage({ action: 'revoke-blob-url', url: blobUrl });
+  }
 }
 
 function sanitizeSpaceName(spaceName) {

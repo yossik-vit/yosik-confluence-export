@@ -29,10 +29,10 @@ Unless following the boy scout rule: only do modifications requested.
 - Every change needs appropriate test coverage — write tests as soon as the functionality is coded, not at the end.
 - All tests must pass before committing.
 - Always set reasonable timeouts on operations that might hang.
-- Follow the **test automation pyramid** (Martin Fowler): always test at the deepest possible layer first.
+- Follow the **test automation pyramid** (Martin Fowler): test at the lowest layer that meaningfully covers the functionality — do not duplicate coverage at a higher layer.
   - **Unit tests** (Node.js, no browser): pure functions — filename sanitization, path computation, index building, link rewriting. Run with `node --test`.
-  - **Integration tests** (Node.js, fetch mocked): functions that call the Confluence REST API — verify correct URLs, pagination, error handling.
-  - **Manual / E2E** (Chrome, real Confluence): only for things that cannot be automated (visual rendering, actual zip download, Obsidian link navigation). Apply the **Automation in Testing** pattern: automate the setup and the result verification; let the human perform only the irreducible interaction in the middle. Document every remaining manual step and why it can't be automated.
+  - **Integration tests** (Node.js, fetch mocked): only for behavior that cannot be verified at unit level — e.g. correct REST URL construction, pagination loop, 401 handling across the fetch boundary.
+  - **Manual / E2E** (Chrome, real Confluence): only for behavior that cannot be verified at integration level (actual zip download, browser rendering, Obsidian link navigation). Apply the **Automation in Testing** pattern: automate the setup and the result verification; let the human perform only the irreducible interaction in the middle. Document every remaining manual step and why it can't be automated.
 - Automate every manual testing step that can be automated (e.g. zip structure validation, Markdown content checks, link rewriting correctness).
 - Run linting together with tests on every check (`npm test` must invoke both).
 

@@ -1,7 +1,8 @@
-importScripts('utils.js', 'vendor/jszip.min.js');
+importScripts('utils.js', 'vendor/jszip.min.js', 'vendor/emoji-map.js');
 
 const PAGE_LIMIT = 50;
 const FETCH_CONCURRENCY = 5;
+const MSG_CHUNK_BYTES = 32 * 1024 * 1024; // 32 MiB — well under Chrome's 64 MiB sendMessage limit
 
 function safePostMessage(port, msg) {
   try {
@@ -131,6 +132,7 @@ async function exportAllPages(pages, pageIndex, baseUrl, zip, port, doneOffset =
       const zipFolder = zipPath.split('/').slice(0, -1).join('/');
 
       html = rewriteInternalLinks(html, zipPath, pageIndex);
+      html = replaceEmojis(html, EMOJI_SHORTCODE_MAP);
       html = await downloadAttachments(html, baseUrl, zipFolder, zip);
 
       const markdown = await htmlToMarkdown(html);
@@ -165,10 +167,26 @@ const ZIP_CHUNK_SIZE = 50;
 
 async function triggerDownload(zip, filename) {
   const base64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE' });
-  const { blobUrl } = await chrome.runtime.sendMessage({
-    action: 'create-blob-url',
-    base64,
-  });
+  const chunkBytes = globalThis.__msgChunkBytes ?? MSG_CHUNK_BYTES;
+  let blobUrl;
+
+  if (base64.length <= chunkBytes) {
+    ({ blobUrl } = await chrome.runtime.sendMessage({
+      action: 'create-blob-url',
+      base64,
+    }));
+  } else {
+    for (let i = 0; i < base64.length; i += chunkBytes) {
+      await chrome.runtime.sendMessage({
+        action: 'blob-chunk',
+        chunk: base64.slice(i, i + chunkBytes),
+      });
+    }
+    ({ blobUrl } = await chrome.runtime.sendMessage({
+      action: 'create-blob-from-chunks',
+    }));
+  }
+
   try {
     await chrome.downloads.download({ url: blobUrl, filename });
   } finally {

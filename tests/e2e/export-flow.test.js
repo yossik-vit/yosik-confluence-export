@@ -308,6 +308,28 @@ test.describe('Error handling', () => {
   });
 });
 
+test.describe('Emoji replacement', () => {
+  test('Confluence emoticons and Twitter emojis are replaced with Unicode', async ({ context, extensionId }) => {
+    const pages = [
+      { id: '100', title: 'Home', ancestors: [] },
+    ];
+    const content = {
+      '100': '<h1>Status</h1>'
+        + '<p>Approved <img class="emoticon" src="/s/abc/images/icons/emoticons/check.svg" alt="(tick)"></p>'
+        + '<p>Celebrate <img class="emoji" src="/plugins/servlet/twitterEmojiRedirector?shortname=:tada:&size=16" alt="tada"></p>',
+    };
+
+    await context.route(`${MOCK_BASE}/**`, buildMockRouter(pages, content));
+    const { zip } = await triggerExportAndCapture(context, extensionId);
+
+    const homeMd = await zip.file('Home.md').async('string');
+    expect(homeMd).toContain('✅');
+    expect(homeMd).toContain('🎉');
+    expect(homeMd).not.toContain('emoticons/check');
+    expect(homeMd).not.toContain('twitterEmojiRedirector');
+  });
+});
+
 test.describe('Cross-space and unknown links', () => {
   test('preserves links to pages not in the exported space', async ({ context, extensionId }) => {
     const pages = [
@@ -444,5 +466,35 @@ test.describe('Chunked zip export', () => {
 
     expect(zips.length).toBe(1);
     expect(zips[0].filename).toBe('Test-Space.zip');
+  });
+});
+
+test.describe('Large zip chunked transfer', () => {
+  test('downloads correctly when base64 exceeds message chunk size', async ({ context, extensionId }) => {
+    // Create a page with a large attachment that forces the chunked transfer path
+    const largeBody = Buffer.alloc(4096, 0x42); // 4 KB attachment
+    const pages = [{ id: '100', title: 'Home', ancestors: [] }];
+    const content = {
+      '100': '<h1>Home</h1><img src="/download/attachments/100/big.png" alt="big">',
+    };
+
+    await context.route(`${MOCK_BASE}/**`, buildMockRouter(pages, content, {
+      attachmentBodies: { 'big.png': largeBody },
+    }));
+
+    // Override the chunk size to a tiny value to force the chunked code path
+    let [sw] = context.serviceWorkers();
+    if (!sw) sw = await context.waitForEvent('serviceworker');
+    await sw.evaluate(() => { globalThis.__msgChunkBytes = 100; });
+
+    const { zip, zips } = await triggerExportAndCapture(context, extensionId);
+
+    expect(zips.length).toBe(1);
+    const imgData = await zip.file('images/big.png').async('uint8array');
+    expect(imgData.length).toBe(4096);
+    expect(imgData[0]).toBe(0x42);
+
+    // Clean up override
+    await sw.evaluate(() => { delete globalThis.__msgChunkBytes; });
   });
 });

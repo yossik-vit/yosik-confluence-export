@@ -1,0 +1,12 @@
+{
+  "name": "conf-export-ext",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Export a Confluence space to Markdown.",
+  "scripts": {
+    "test": "eslint . && node --test tests/**/*.test.js"
+  },
+  "devDependencies": {
+    "eslint": "^9.0.0"
+  }
+}

@@ -13,10 +13,11 @@
 ## Standing Orders
 - Update this file when learning something new about the project.
 - Update README.md when relevant changes happen.
-- Commit early, commit often — after completing a task (once checks pass).
+- Commit after every completed vertical slice (once checks pass).
+- Before committing, check whether any new files or directories should be added to `.gitignore`.
 
 ## Programming Rules
-- **Agile delivery:** minimal vertical slices, working end-to-end before expanding.
+- **Agile delivery:** minimal vertical slices, fully tested and working end-to-end before expanding.
 - **YAGNI / KISS:** simplest solution that works.
 - **Boy scout rule:** fix pre-existing issues (lint errors, broken behavior) even if not caused by current changes.
 - No magic numbers — use named constants.

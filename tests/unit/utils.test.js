@@ -8,8 +8,8 @@ import { join, dirname } from 'node:path';
 const __dir = dirname(fileURLToPath(import.meta.url));
 const utilsSrc = readFileSync(join(__dir, '../../utils.js'), 'utf8');
 const ctx = {};
-runInNewContext(utilsSrc, ctx);
-const { pageToFilename, pageToFolderName, buildPageIndex, computeRelativePath, rewriteInternalLinks, escapeParensForMarkdown } = ctx;
+runInNewContext(utilsSrc + '\nthis.CONFLUENCE_EMOTICON_MAP = CONFLUENCE_EMOTICON_MAP;\nthis.replaceEmojis = replaceEmojis;\n', ctx);
+const { pageToFilename, pageToFolderName, buildPageIndex, computeRelativePath, rewriteInternalLinks, escapeParensForMarkdown, replaceEmojis, CONFLUENCE_EMOTICON_MAP } = ctx;
 
 describe('pageToFilename', () => {
   it('converts spaces to hyphens', () => {
@@ -235,5 +235,57 @@ describe('escapeParensForMarkdown', () => {
       escapeParensForMarkdown('file ((nested)).png'),
       'file %28%28nested%29%29.png',
     );
+  });
+});
+
+describe('replaceEmojis', () => {
+  const mockShortcodeMap = { tada: '🎉', heart: '❤️', '+1': '👍' };
+
+  it('replaces Confluence emoticon img with Unicode', () => {
+    const html = '<p>Good <img class="emoticon" src="/s/abc/images/icons/emoticons/thumbs_up.svg" alt="thumbs up"> work</p>';
+    assert.equal(replaceEmojis(html, {}), '<p>Good 👍 work</p>');
+  });
+
+  it('replaces Twitter emoji redirector img with Unicode', () => {
+    const html = '<p>Party <img class="emoji" src="/plugins/servlet/twitterEmojiRedirector?shortname=:tada:&size=16" alt="tada"></p>';
+    assert.equal(replaceEmojis(html, mockShortcodeMap), '<p>Party 🎉</p>');
+  });
+
+  it('replaces both types in the same HTML', () => {
+    const html = '<img src="/s/x/images/icons/emoticons/smile.svg"> <img src="/x/twitterEmojiRedirector?shortname=:heart:&size=16">';
+    const result = replaceEmojis(html, mockShortcodeMap);
+    assert.equal(result, '🙂 ❤️');
+  });
+
+  it('handles .png emoticon extension', () => {
+    const html = '<img src="/s/abc/images/icons/emoticons/check.png">';
+    assert.equal(replaceEmojis(html, {}), '✅');
+  });
+
+  it('preserves unrecognized emoticon filenames', () => {
+    const html = '<img src="/s/abc/images/icons/emoticons/unknown_thing.svg">';
+    assert.equal(replaceEmojis(html, {}), html);
+  });
+
+  it('preserves unrecognized Twitter emoji shortcodes', () => {
+    const html = '<img src="/x/twitterEmojiRedirector?shortname=:nonexistent_emoji_xyz:&size=16">';
+    assert.equal(replaceEmojis(html, mockShortcodeMap), html);
+  });
+
+  it('handles emoticon img with extra attributes', () => {
+    const html = '<img class="emoticon emoticon-tick" data-emoticon-name="tick" src="/s/abc/images/icons/emoticons/check.svg" alt="(tick)" title="(tick)">';
+    assert.equal(replaceEmojis(html, {}), '✅');
+  });
+
+  it('replaces all 22 Confluence emoticons', () => {
+    for (const [filename, emoji] of Object.entries(CONFLUENCE_EMOTICON_MAP)) {
+      const html = `<img src="/s/x/images/icons/emoticons/${filename}.svg">`;
+      assert.equal(replaceEmojis(html, {}), emoji, `${filename} should map to ${emoji}`);
+    }
+  });
+
+  it('does not touch regular attachment images', () => {
+    const html = '<img src="/download/attachments/123/diagram.png" alt="Diagram">';
+    assert.equal(replaceEmojis(html, mockShortcodeMap), html);
   });
 });

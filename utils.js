@@ -1,4 +1,4 @@
-/* exported pageToFilename, pageToFolderName, buildPageIndex, computeRelativePath, rewriteInternalLinks, escapeParensForMarkdown */
+/* exported pageToFilename, pageToFolderName, buildPageIndex, computeRelativePath, rewriteInternalLinks, escapeParensForMarkdown, replaceEmojis, CONFLUENCE_EMOTICON_MAP */
 
 const UNSAFE_CHARS = /[<>:"/\\|?*\x00-\x1F]/g;
 const FALLBACK_TITLE = 'Untitled';
@@ -54,6 +54,56 @@ function escapeParensForMarkdown(str) {
 }
 
 const PAGE_HREF_RE = /\/pages\/(\d+)|[?&]pageId=(\d+)/;
+
+/**
+ * Maps Confluence built-in emoticon image filenames (without extension)
+ * to Unicode emoji characters. Covers all 22 built-in emoticons.
+ */
+const CONFLUENCE_EMOTICON_MAP = {
+  'smile':         '\u{1F642}',  // 🙂
+  'sad':           '\u{1F61E}',  // 😞
+  'tongue':        '\u{1F61B}',  // 😛 (ac:name "cheeky")
+  'biggrin':       '\u{1F603}',  // 😃 (ac:name "laugh")
+  'wink':          '\u{1F609}',  // 😉
+  'thumbs_up':     '\u{1F44D}',  // 👍
+  'thumbs_down':   '\u{1F44E}',  // 👎
+  'information':   '\u{2139}\u{FE0F}',  // ℹ️
+  'check':         '\u{2705}',   // ✅ (ac:name "tick")
+  'error':         '\u{274C}',   // ❌ (ac:name "cross")
+  'warning':       '\u{26A0}\u{FE0F}',  // ⚠️
+  'add':           '\u{2795}',   // ➕ (ac:name "plus")
+  'forbidden':     '\u{26D4}',   // ⛔ (ac:name "minus")
+  'help_16':       '\u{2753}',   // ❓ (ac:name "question")
+  'lightbulb_on':  '\u{1F4A1}',  // 💡 (ac:name "light-on")
+  'lightbulb':     '\u{1F4A1}',  // 💡 (ac:name "light-off", dim variant)
+  'star_yellow':   '\u{2B50}',   // ⭐
+  'star_red':      '\u{1F534}',  // 🔴
+  'star_green':    '\u{1F7E2}',  // 🟢
+  'star_blue':     '\u{1F535}',  // 🔵
+  'heart':         '\u{2764}\u{FE0F}',  // ❤️
+  'broken_heart':  '\u{1F494}',  // 💔
+};
+
+const EMOTICON_IMG_RE = /<img\s[^>]*src="[^"]*\/images\/icons\/emoticons\/([^."]+)\.[^"]*"[^>]*>/gi;
+const TWITTER_EMOJI_IMG_RE = /<img\s[^>]*src="[^"]*twitterEmojiRedirector\?shortname=:([^:]+):[^"]*"[^>]*>/gi;
+
+/**
+ * Replace Confluence emoticon and Twitter emoji <img> tags with Unicode characters.
+ * @param {string} html - Raw HTML from body.view
+ * @param {Object} shortcodeMap - Map of shortcode → Unicode (from vendor/emoji-map.js)
+ * @returns {string} HTML with emoji <img> tags replaced by Unicode characters
+ */
+function replaceEmojis(html, shortcodeMap) {
+  html = html.replace(EMOTICON_IMG_RE, (_match, filename) => {
+    return CONFLUENCE_EMOTICON_MAP[filename] ?? _match;
+  });
+
+  html = html.replace(TWITTER_EMOJI_IMG_RE, (_match, shortname) => {
+    return shortcodeMap[shortname] ?? _match;
+  });
+
+  return html;
+}
 
 function rewriteInternalLinks(html, sourceZipPath, pageIndex) {
   return html.replace(/<a\s+([^>]*href="([^"]*)"[^>]*)>/gi, (match, _attrs, href) => {

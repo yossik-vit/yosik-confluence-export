@@ -30,6 +30,10 @@ const swGlobals = {
   computeRelativePath: 'readonly',
   rewriteInternalLinks: 'readonly',
   escapeParensForMarkdown: 'readonly',
+  replaceEmojis: 'readonly',
+  CONFLUENCE_EMOTICON_MAP: 'readonly',
+  // from vendor/emoji-map.js (loaded via importScripts)
+  EMOJI_SHORTCODE_MAP: 'readonly',
 };
 
 export default [

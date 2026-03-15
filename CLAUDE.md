@@ -15,6 +15,7 @@
 - Update this file when learning something new about the project.
 - Update README.md when relevant changes happen.
 - Commit after every completed vertical slice (once checks pass).
+- Before every commit, review all uncommitted files (`git status`). For each file, decide: commit it (if intentional) or delete it (if leftover/accidental). Do not leave unexplained uncommitted files behind.
 - Before committing, check whether any new files or directories should be added to `.gitignore`.
 
 ## Programming Rules

@@ -32,7 +32,7 @@ Unless following the boy scout rule: only do modifications requested.
 - Follow the **test automation pyramid** (Martin Fowler): always test at the deepest possible layer first.
   - **Unit tests** (Node.js, no browser): pure functions — filename sanitization, path computation, index building, link rewriting. Run with `node --test`.
   - **Integration tests** (Node.js, fetch mocked): functions that call the Confluence REST API — verify correct URLs, pagination, error handling.
-  - **Manual / E2E** (Chrome, real Confluence): only for things that cannot be automated (visual rendering, actual zip download, Obsidian link navigation). Automate as much of this layer as possible; document what remains manual and why.
+  - **Manual / E2E** (Chrome, real Confluence): only for things that cannot be automated (visual rendering, actual zip download, Obsidian link navigation). Apply the **Automation in Testing** pattern: automate the setup and the result verification; let the human perform only the irreducible interaction in the middle. Document every remaining manual step and why it can't be automated.
 - Automate every manual testing step that can be automated (e.g. zip structure validation, Markdown content checks, link rewriting correctness).
 - Run linting together with tests on every check (`npm test` must invoke both).
 

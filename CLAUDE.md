@@ -8,7 +8,8 @@
 
 ## Conventions
 - No build step, no transpilation. Plain `.js` files loaded directly by the extension.
-- Keep dependencies as vendored scripts in `vendor/` (loaded via `manifest.json`), not via npm.
+- Runtime dependencies (JSZip, Turndown, …) are vendored in `vendor/` and loaded via `importScripts()` — not via npm.
+- Dev tooling (ESLint, Playwright, …) lives in `package.json` devDependencies — npm is fine for tools that never ship in the extension.
 
 ## Standing Orders
 - Update this file when learning something new about the project.
@@ -31,11 +32,11 @@ Unless following the boy scout rule: only do modifications requested.
 - All tests must pass before committing.
 - Always set reasonable timeouts on operations that might hang.
 - Follow the **test automation pyramid** (Martin Fowler): test at the lowest layer that meaningfully covers the functionality — do not duplicate coverage at a higher layer.
-  - **Unit tests** (Node.js, no browser): pure functions — filename sanitization, path computation, index building, link rewriting. Run with `node --test`.
-  - **Integration tests** (Node.js, fetch mocked): only for behavior that cannot be verified at unit level — e.g. correct REST URL construction, pagination loop, 401 handling across the fetch boundary.
-  - **Manual / E2E** (Chrome, real Confluence): only for behavior that cannot be verified at integration level (actual zip download, browser rendering, Obsidian link navigation). Apply the **Automation in Testing** pattern: automate the setup and the result verification; let the human perform only the irreducible interaction in the middle. Document every remaining manual step and why it can't be automated.
-- Automate every manual testing step that can be automated (e.g. zip structure validation, Markdown content checks, link rewriting correctness).
-- Run linting together with tests on every check (`npm test` must invoke both).
+  - **Unit tests** (Node.js, no browser): pure functions — filename sanitization, path computation, index building, link rewriting. Run with `npm test`.
+  - **Integration tests** (Node.js, fetch mocked): only for behavior that cannot be verified at unit level — e.g. correct REST URL construction, pagination loop, 401 handling across the fetch boundary. Run with `npm test`.
+  - **E2E tests** (Playwright, Chrome with extension loaded): popup UI, extension lifecycle, and flows that require a real browser context but not a live Confluence instance. Run with `npm run test:e2e`. Uses `headless: false` — Chrome extensions require it. Apply the **Automation in Testing** pattern: automate setup and result verification; let the human perform only steps that need a real Confluence instance. Document every remaining manual step and why it cannot be automated.
+- Automate every testing step that can be automated. Steps requiring a live Confluence instance are the only acceptable residual manual steps.
+- `npm test` runs lint + unit/integration tests. `npm run test:e2e` runs Playwright E2E tests. Both must pass before committing.
 
 ## Linting
 - Use ESLint with a config committed to the repo.

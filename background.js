@@ -3,6 +3,14 @@ importScripts('utils.js', 'vendor/jszip.min.js');
 const PAGE_LIMIT = 50;
 const FETCH_CONCURRENCY = 5;
 
+function safePostMessage(port, msg) {
+  try {
+    port.postMessage(msg);
+  } catch {
+    // Port disconnected (popup closed) — nothing to report to.
+  }
+}
+
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'export') return;
   port.onMessage.addListener(({ action, tabId, tabUrl }) => {
@@ -58,12 +66,19 @@ async function fetchPageContent(baseUrl, pageId) {
   return data.body?.view?.value ?? '';
 }
 
+const OFFSCREEN_RETRY_LIMIT = 10;
+const OFFSCREEN_RETRY_DELAY_MS = 100;
+
 async function htmlToMarkdown(html) {
-  const response = await chrome.runtime.sendMessage({
-    action: 'convert-html',
-    html,
-  });
-  return response.markdown;
+  for (let attempt = 0; attempt < OFFSCREEN_RETRY_LIMIT; attempt++) {
+    const response = await chrome.runtime.sendMessage({
+      action: 'convert-html',
+      html,
+    });
+    if (response?.markdown !== undefined) return response.markdown;
+    await new Promise(r => setTimeout(r, OFFSCREEN_RETRY_DELAY_MS));
+  }
+  throw new Error('Offscreen document did not respond to convert-html');
 }
 
 const ATTACHMENT_SRC_RE = /\/download\/(attachments|thumbnails)\/\d+\/([^?"]+)/;
@@ -104,9 +119,9 @@ async function downloadAttachments(html, baseUrl, zipFolderPath, zip) {
   return rewritten;
 }
 
-async function exportAllPages(pages, pageIndex, baseUrl, zip, port) {
-  const total = pages.length;
-  let done = 0;
+async function exportAllPages(pages, pageIndex, baseUrl, zip, port, doneOffset = 0, totalPages = pages.length) {
+  const total = totalPages;
+  let done = doneOffset;
 
   for (let i = 0; i < pages.length; i += FETCH_CONCURRENCY) {
     const batch = pages.slice(i, i + FETCH_CONCURRENCY);
@@ -121,10 +136,13 @@ async function exportAllPages(pages, pageIndex, baseUrl, zip, port) {
       const markdown = await htmlToMarkdown(html);
       zip.file(zipPath, markdown);
       done++;
-      port.postMessage({ type: 'progress', current: done, total, message: page.title });
+      safePostMessage(port, { type: 'progress', current: done, total, message: page.title });
     }));
   }
 }
+
+const OFFSCREEN_READY_LIMIT = 50;
+const OFFSCREEN_READY_DELAY_MS = 50;
 
 async function ensureOffscreenDocument() {
   const existing = await chrome.offscreen.hasDocument();
@@ -135,40 +153,68 @@ async function ensureOffscreenDocument() {
       justification: 'HTML-to-Markdown conversion and zip download',
     });
   }
+  for (let i = 0; i < OFFSCREEN_READY_LIMIT; i++) {
+    const res = await chrome.runtime.sendMessage({ action: 'ping' });
+    if (res?.ready) return;
+    await new Promise(r => setTimeout(r, OFFSCREEN_READY_DELAY_MS));
+  }
+  throw new Error('Offscreen document failed to initialize');
 }
 
-async function triggerDownload(zip, spaceName) {
+const ZIP_CHUNK_SIZE = 50;
+
+async function triggerDownload(zip, filename) {
   const base64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE' });
   const dataUrl = `data:application/zip;base64,${base64}`;
-  const safeName = spaceName.replace(/[<>:"/\\|?*]/g, '').replace(/\s+/g, '-');
-  await chrome.downloads.download({ url: dataUrl, filename: `${safeName}.zip` });
+  await chrome.downloads.download({ url: dataUrl, filename });
+}
+
+function sanitizeSpaceName(spaceName) {
+  return spaceName.replace(/[<>:"/\\|?*]/g, '').replace(/\s+/g, '-');
 }
 
 async function runExport(port, tabId, tabUrl) {
   try {
-  port.postMessage({ type: 'progress', message: 'Detecting space…' });
+  safePostMessage(port, { type: 'progress', message: 'Detecting space…' });
 
   const { baseUrl, spaceKey } = await detectConfluenceContext(tabId, tabUrl);
   const spaceName = await fetchSpaceName(baseUrl, spaceKey);
-  port.postMessage({ type: 'progress', message: 'Fetching page list…' });
+  safePostMessage(port, { type: 'progress', message: 'Fetching page list…' });
 
   const pages = await fetchAllPages(baseUrl, spaceKey, (count) => {
-    port.postMessage({ type: 'progress', message: `Found ${count} pages…` });
+    safePostMessage(port, { type: 'progress', message: `Found ${count} pages…` });
   });
 
   const pageIndex = buildPageIndex(pages);
-  const zip = new JSZip();
 
   await ensureOffscreenDocument();
 
-  port.postMessage({ type: 'progress', message: 'Exporting pages…', current: 0, total: pages.length });
-  await exportAllPages(pages, pageIndex, baseUrl, zip, port);
+  const safeName = sanitizeSpaceName(spaceName);
+  const chunks = [];
+  for (let i = 0; i < pages.length; i += ZIP_CHUNK_SIZE) {
+    chunks.push(pages.slice(i, i + ZIP_CHUNK_SIZE));
+  }
+  const totalChunks = chunks.length;
 
-  port.postMessage({ type: 'progress', message: 'Building zip…' });
-  await triggerDownload(zip, spaceName);
+  let globalDone = 0;
+  for (let c = 0; c < totalChunks; c++) {
+    const chunk = chunks[c];
+    const zip = new JSZip();
+    const chunkLabel = totalChunks > 1 ? ` (part ${c + 1}/${totalChunks})` : '';
 
-  port.postMessage({ type: 'done', message: `Done! ${pages.length} pages` });
+    safePostMessage(port, { type: 'progress', message: `Exporting pages${chunkLabel}…`, current: globalDone, total: pages.length });
+    await exportAllPages(chunk, pageIndex, baseUrl, zip, port, globalDone, pages.length);
+    globalDone += chunk.length;
+
+    const filename = totalChunks > 1
+      ? `${safeName}-${c + 1}.zip`
+      : `${safeName}.zip`;
+    safePostMessage(port, { type: 'progress', message: `Building zip${chunkLabel}…` });
+    await triggerDownload(zip, filename);
+  }
+
+  safePostMessage(port, { type: 'done', message: `Done! ${pages.length} pages in ${totalChunks} zip${totalChunks > 1 ? 's' : ''}` });
   } catch (err) {
-    port.postMessage({ type: 'error', message: err.message });
+    safePostMessage(port, { type: 'error', message: err.message });
   }
 }

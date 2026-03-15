@@ -12,6 +12,7 @@ const browserGlobals = {
 const offscreenGlobals = {
   TurndownService: 'readonly',
   turndownPluginGfm: 'readonly',
+  setTimeout: 'readonly',
 };
 const swGlobals = {
   importScripts: 'readonly',

@@ -168,13 +168,13 @@ const ZIP_CHUNK_SIZE = 50;
 async function triggerDownload(zip, filename) {
   const base64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE' });
   const chunkBytes = globalThis.__msgChunkBytes ?? MSG_CHUNK_BYTES;
-  let blobUrl;
 
   if (base64.length <= chunkBytes) {
-    ({ blobUrl } = await chrome.runtime.sendMessage({
-      action: 'create-blob-url',
+    await chrome.runtime.sendMessage({
+      action: 'trigger-download',
       base64,
-    }));
+      filename,
+    });
   } else {
     for (let i = 0; i < base64.length; i += chunkBytes) {
       await chrome.runtime.sendMessage({
@@ -182,15 +182,10 @@ async function triggerDownload(zip, filename) {
         chunk: base64.slice(i, i + chunkBytes),
       });
     }
-    ({ blobUrl } = await chrome.runtime.sendMessage({
-      action: 'create-blob-from-chunks',
-    }));
-  }
-
-  try {
-    await chrome.downloads.download({ url: blobUrl, filename });
-  } finally {
-    chrome.runtime.sendMessage({ action: 'revoke-blob-url', url: blobUrl });
+    await chrome.runtime.sendMessage({
+      action: 'trigger-download-from-chunks',
+      filename,
+    });
   }
 }
 

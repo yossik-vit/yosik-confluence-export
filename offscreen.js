@@ -8,6 +8,27 @@ const turndown = (() => {
   return td;
 })();
 
+const BLOB_REVOKE_DELAY_MS = 1000;
+
+function base64ToBlob(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: 'application/zip' });
+}
+
+function triggerAnchorDownload(base64, filename) {
+  const blob = base64ToBlob(base64);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), BLOB_REVOKE_DELAY_MS);
+}
+
 let pendingChunks = [];
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -29,26 +50,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     sendResponse({ ok: true });
     return true;
   }
-  if (msg.action === 'create-blob-from-chunks') {
+  if (msg.action === 'trigger-download-from-chunks') {
     const base64 = pendingChunks.join('');
     pendingChunks = [];
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    const blob = new Blob([bytes], { type: 'application/zip' });
-    sendResponse({ blobUrl: URL.createObjectURL(blob) });
+    triggerAnchorDownload(base64, msg.filename);
+    sendResponse({ ok: true });
     return true;
   }
-  if (msg.action === 'create-blob-url') {
-    const binary = atob(msg.base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    const blob = new Blob([bytes], { type: 'application/zip' });
-    sendResponse({ blobUrl: URL.createObjectURL(blob) });
-    return true;
-  }
-  if (msg.action === 'revoke-blob-url') {
-    URL.revokeObjectURL(msg.url);
+  if (msg.action === 'trigger-download') {
+    triggerAnchorDownload(msg.base64, msg.filename);
     sendResponse({ ok: true });
     return true;
   }

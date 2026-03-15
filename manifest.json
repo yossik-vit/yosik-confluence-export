@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Export a Confluence space to Markdown.",
   "author": "Christian Baumann <mail@christianbaumann.dev> (www.christianbaumann.dev)",
-  "permissions": ["activeTab", "downloads", "offscreen", "scripting"],
+  "permissions": ["activeTab", "offscreen", "scripting"],
   "host_permissions": ["<all_urls>"],
   "action": {
     "default_popup": "popup.html",

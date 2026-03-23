@@ -79,6 +79,7 @@ async function htmlToMarkdown(html) {
       html,
     });
     if (response?.markdown !== undefined) return response.markdown;
+    await ensureOffscreenDocument();
     await new Promise(r => setTimeout(r, OFFSCREEN_RETRY_DELAY_MS));
   }
   throw new Error('Offscreen document did not respond to convert-html');
@@ -221,7 +222,10 @@ function sanitizeSpaceName(spaceName) {
   return sanitizeZipPathSegment(spaceName, 'Confluence-Export');
 }
 
+const KEEPALIVE_INTERVAL_MS = 25000;
+
 async function runExport(port, tabId, tabUrl) {
+  const keepaliveId = setInterval(() => { chrome.runtime.getPlatformInfo(); }, KEEPALIVE_INTERVAL_MS);
   try {
   safePostMessage(port, { type: 'progress', message: 'Detecting space…' });
 
@@ -263,5 +267,7 @@ async function runExport(port, tabId, tabUrl) {
   safePostMessage(port, { type: 'done', message: `Done! ${pages.length} pages in ${totalChunks} zip${totalChunks > 1 ? 's' : ''}` });
   } catch (err) {
     safePostMessage(port, { type: 'error', message: err.message });
+  } finally {
+    clearInterval(keepaliveId);
   }
 }

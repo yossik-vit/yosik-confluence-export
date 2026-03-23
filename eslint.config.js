@@ -24,6 +24,8 @@ const swGlobals = {
   Map: 'readonly',
   Set: 'readonly',
   setTimeout: 'readonly',
+  setInterval: 'readonly',
+  clearInterval: 'readonly',
   // from utils.js (loaded via importScripts)
   pageToFilename: 'readonly',
   pageToFolderName: 'readonly',

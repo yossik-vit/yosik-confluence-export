@@ -47,6 +47,7 @@ Unless following the boy scout rule: only do modifications requested.
 
 ## Architecture Notes
 - **Download flow:** background.js (orchestration) → offscreen.js (HTML→MD conversion + download trigger). Downloads are triggered via anchor click in the offscreen document — not via `chrome.downloads.download()` in the service worker — because blob URLs created in one context don't honor the `filename` parameter when downloaded from a different context.
+- **Zip root folder:** All zip paths are prefixed with the sanitized space name (via `buildPageIndex(pages, rootFolder)`). This ensures chunked exports (multiple ZIPs) all share the same root folder and merge into one directory when extracted by macOS Archive Utility.
 
 ## Output
 Brief but precise, no bloat. Bullet points where appropriate.

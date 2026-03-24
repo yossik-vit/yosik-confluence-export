@@ -49,8 +49,8 @@ describe('pageToFilename', () => {
     assert.equal(pageToFilename('Page\x00Name'), 'PageName.md');
   });
 
-  it('transliterates accented Latin characters to ASCII', () => {
-    assert.equal(pageToFilename('202603 João Santos'), '202603-Joao-Santos.md');
+  it('preserves accented Latin characters (Unicode-safe paths)', () => {
+    assert.equal(pageToFilename('202603 João Santos'), '202603-João-Santos.md');
   });
 
   it('removes replacement characters from broken titles', () => {
@@ -94,8 +94,8 @@ describe('sanitizeZipPathSegment', () => {
 });
 
 describe('sanitizeZipFilename', () => {
-  it('preserves the extension while transliterating the basename', () => {
-    assert.equal(sanitizeZipFilename('Überblick final.pdf'), 'Uberblick-final.pdf');
+  it('preserves the extension and Unicode characters in basename', () => {
+    assert.equal(sanitizeZipFilename('Überblick final.pdf'), 'Überblick-final.pdf');
   });
 
   it('falls back when the basename becomes empty', () => {
@@ -157,13 +157,13 @@ describe('buildPageIndex', () => {
     assert.equal(index.get('2').zipPath, 'Space/My-Page/Sub-Page.md');
   });
 
-  it('uses ASCII-safe paths for accented titles', () => {
+  it('preserves Unicode characters in paths', () => {
     const pages = [
       { id: '1', title: 'Equipe', ancestors: [] },
       { id: '2', title: '202603 João Santos', ancestors: [{ title: 'Equipe' }] },
     ];
     const index = buildPageIndex(pages, 'Space');
-    assert.equal(index.get('2').zipPath, 'Space/Equipe/202603-Joao-Santos.md');
+    assert.equal(index.get('2').zipPath, 'Space/Equipe/202603-João-Santos.md');
   });
 
   it('appends suffix for duplicate filenames in same parent', () => {

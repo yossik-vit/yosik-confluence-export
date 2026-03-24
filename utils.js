@@ -2,17 +2,17 @@
 
 const UNSAFE_CHARS = /[<>:"/\\|?*\x00-\x1F]/g;
 const COMBINING_MARKS = /[\u0300-\u036f]/g;
-const NON_ASCII_CHARS = /[^A-Za-z0-9!#$%&'()+,.;=@[\]^_`{}~ -]/g;
+// Keep Unicode letters/numbers (Cyrillic, CJK, etc.) — only strip control/special chars
+const NON_SAFE_CHARS = /[^\p{L}\p{N}!#$%&'()+,.;=@[\]^_`{}~ -]/gu;
 const FALLBACK_TITLE = 'Untitled';
 const FALLBACK_ATTACHMENT_NAME = 'file';
 
 function sanitizeZipPathSegment(value, fallback = FALLBACK_TITLE) {
   const safe = (value ?? '')
-    .normalize('NFKD')
-    .replace(COMBINING_MARKS, '')
+    .normalize('NFC')  // NFC preserves Cyrillic; NFKD would decompose accented Latin
     .replace(/\uFFFD/g, '')
     .replace(UNSAFE_CHARS, '')
-    .replace(NON_ASCII_CHARS, '-')
+    .replace(NON_SAFE_CHARS, '-')
     .replace(/\s+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-+|-+$/g, '');
@@ -47,17 +47,63 @@ function pageToFolderName(title) {
   return pageToFilename(title).replace(/\.md$/, '');
 }
 
-function buildPageIndex(pages, rootFolder) {
+function buildPageIndex(pages, rootFolder, preserveOrder) {
+  // Build set of parent IDs to know which pages have children
+  const parentIds = new Set();
+  for (const page of pages) {
+    if (page.ancestors && page.ancestors.length > 0) {
+      parentIds.add(page.ancestors[page.ancestors.length - 1].id);
+    }
+  }
+
+  // Build sibling order: for each parent, track the position of each child
+  // Confluence API returns pages in their manual sort order
+  const siblingOrder = new Map(); // pageId → zero-based position among siblings
+  if (preserveOrder) {
+    const childrenByParent = new Map(); // parentId → [pageId, ...]
+    for (const page of pages) {
+      const parentId = (page.ancestors && page.ancestors.length > 0)
+        ? page.ancestors[page.ancestors.length - 1].id
+        : '__root__';
+      if (!childrenByParent.has(parentId)) childrenByParent.set(parentId, []);
+      childrenByParent.get(parentId).push(page.id);
+    }
+    for (const children of childrenByParent.values()) {
+      for (let i = 0; i < children.length; i++) {
+        siblingOrder.set(children[i], i);
+      }
+    }
+  }
+
   const index = new Map();
   const pathsSeen = new Set();
   for (const page of pages) {
     const folderParts = page.ancestors.map(a => pageToFolderName(a.title));
     if (rootFolder) folderParts.unshift(rootFolder);
-    let filename = pageToFilename(page.title);
+
+    // Folder note convention: if page has children, place it inside its own folder
+    const isParent = parentIds.has(page.id);
+    if (isParent) {
+      folderParts.push(pageToFolderName(page.title));
+    }
+
+    // Optional sort prefix: "01-Title.md"
+    let filename;
+    if (preserveOrder && siblingOrder.has(page.id)) {
+      const order = siblingOrder.get(page.id);
+      const prefix = String(order + 1).padStart(2, '0');
+      filename = `${prefix}-${pageToFilename(page.title)}`;
+    } else {
+      filename = pageToFilename(page.title);
+    }
+
     let candidate = [...folderParts, filename].join('/');
     let suffix = 2;
     while (pathsSeen.has(candidate)) {
-      filename = pageToFilename(page.title).replace('.md', `-${suffix}.md`);
+      const base = pageToFilename(page.title).replace('.md', `-${suffix}.md`);
+      filename = preserveOrder && siblingOrder.has(page.id)
+        ? `${String(siblingOrder.get(page.id) + 1).padStart(2, '0')}-${base}`
+        : base;
       candidate = [...folderParts, filename].join('/');
       suffix++;
     }

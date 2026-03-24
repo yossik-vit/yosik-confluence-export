@@ -1,14 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "Conf Export Ext",
+  "name": "Yosik Confluence Export",
   "version": "1.0.0",
-  "description": "Export a Confluence space to Markdown.",
-  "author": "Christian Baumann <mail@christianbaumann.dev> (www.christianbaumann.dev)",
-  "permissions": ["activeTab", "offscreen", "scripting"],
+  "description": "Export Confluence pages to Obsidian-compatible Markdown. Single page, selective, or full space export.",
+  "permissions": ["activeTab", "offscreen", "scripting", "storage", "alarms"],
   "host_permissions": ["<all_urls>"],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Conf Export Ext"
+    "default_title": "Yosik Confluence Export"
   },
   "background": {
     "service_worker": "background.js"

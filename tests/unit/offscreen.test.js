@@ -18,9 +18,11 @@ function buildMockContext() {
     // TurndownService stub
     TurndownService: class {
       use() {}
+      addRule() {}
       turndown(html) { return html; }
     },
     turndownPluginGfm: { gfm: {} },
+    addConfluenceTurndownRules() {},
 
     // DOM stubs
     atob(b64) { return Buffer.from(b64, 'base64').toString('binary'); },
@@ -45,11 +47,24 @@ function buildMockContext() {
     },
     setTimeout(fn) { fn(); },
 
+    // Worker stub (turndown workers not needed for download tests)
+    Worker: class {
+      constructor() { this.onmessage = null; }
+      postMessage() {}
+      terminate() {}
+    },
+    Map,
+    Promise,
+    clearTimeout,
+
     // Chrome runtime stub
     chrome: {
       runtime: {
         onMessage: {
           addListener(fn) { listeners.push(fn); },
+        },
+        onConnect: {
+          addListener() {},
         },
       },
     },

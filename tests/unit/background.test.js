@@ -39,6 +39,7 @@ function buildMockContext(overrides = {}) {
     Set,
     URL,
     console,
+    AbortController,
     fetch: overrides.fetch ?? (async () => ({ ok: true, status: 200, json: async () => ({}), arrayBuffer: async () => new ArrayBuffer(0) })),
     globalThis: {},
 
@@ -48,6 +49,23 @@ function buildMockContext(overrides = {}) {
         onConnect: {
           addListener(fn) { onConnectListeners.push(fn); },
         },
+        connect(opts) {
+          // Mock port for turndown: echoes back html as markdown
+          const portListeners = [];
+          return {
+            name: opts?.name ?? 'unknown',
+            postMessage(msg) {
+              // Simulate async worker response
+              setTimeout(() => {
+                for (const fn of portListeners) {
+                  fn({ id: msg.id, markdown: msg.html ?? '' });
+                }
+              }, 0);
+            },
+            onMessage: { addListener(fn) { portListeners.push(fn); } },
+            onDisconnect: { addListener() {} },
+          };
+        },
         async sendMessage(msg) {
           sendMessageCalls.push(msg);
           if (sendMessageResponses.length > 0) {
@@ -56,6 +74,11 @@ function buildMockContext(overrides = {}) {
           return undefined;
         },
         getPlatformInfo() { return Promise.resolve({ os: 'mac' }); },
+      },
+      alarms: {
+        async create() {},
+        async clear() {},
+        onAlarm: { addListener() {} },
       },
       offscreen: {
         Reason: { BLOBS: 'BLOBS' },
@@ -109,60 +132,45 @@ function buildMockContext(overrides = {}) {
   return ctx;
 }
 
-describe('htmlToMarkdown offscreen recovery', () => {
+describe('htmlToMarkdown port-based conversion', () => {
   let ctx;
 
   beforeEach(() => {
     ctx = buildMockContext();
   });
 
-  it('returns markdown on first successful response', async () => {
-    ctx._sendMessageResponses.push(
-      { markdown: '# Hello' },  // convert-html succeeds immediately
-    );
+  it('returns markdown via port on first successful response', async () => {
+    ctx._sendMessageResponses.push({ ready: true }); // ping
     runInNewContext(backgroundSrc + EXPOSE_INTERNALS, ctx);
 
+    // Mock port echoes html as markdown — verifying round trip works
     const result = await ctx.htmlToMarkdown('<h1>Hello</h1>');
-    assert.equal(result, '# Hello');
+    assert.equal(result, '<h1>Hello</h1>');
   });
 
-  it('recreates offscreen doc when response is undefined and retries', async () => {
-    // 1. convert-html returns undefined (offscreen closed by Chrome)
-    // 2. ensureOffscreenDocument: hasDocument → false → creates doc → ping succeeds
-    // 3. retry convert-html → succeeds
-    ctx._sendMessageResponses.push(
-      undefined,          // first convert-html — offscreen closed
-      { ready: true },    // ensureOffscreenDocument ping after recreation
-      { markdown: 'ok' }, // second convert-html — success
-    );
-    ctx._hasDocumentResults.push(
-      false, // ensureOffscreenDocument check — doc was closed by Chrome
-    );
+  it('recreates offscreen doc when not present', async () => {
+    ctx._hasDocumentResults.push(false); // doc missing
+    ctx._sendMessageResponses.push({ ready: true }); // ping after creation
     runInNewContext(backgroundSrc + EXPOSE_INTERNALS, ctx);
 
     const result = await ctx.htmlToMarkdown('<p>ok</p>');
-    assert.equal(result, 'ok');
+    assert.equal(result, '<p>ok</p>');
 
-    // Verify ensureOffscreenDocument was called to recreate
     assert.ok(
       ctx._createDocumentCalls.length >= 1,
-      'expected offscreen document to be recreated',
+      'expected offscreen document to be created',
     );
   });
 
-  it('throws after all retries exhausted when offscreen never responds', async () => {
-    const RETRY_LIMIT = 10;
-    for (let i = 0; i < RETRY_LIMIT; i++) {
-      ctx._sendMessageResponses.push(undefined);       // convert-html fails
-      ctx._sendMessageResponses.push({ ready: true });  // ensureOffscreenDocument ping
-      ctx._hasDocumentResults.push(true);                // doc exists but not responding
-    }
+  it('uses port-based communication not sendMessage for conversion', async () => {
+    ctx._sendMessageResponses.push({ ready: true }); // ping only
     runInNewContext(backgroundSrc + EXPOSE_INTERNALS, ctx);
 
-    await assert.rejects(
-      () => ctx.htmlToMarkdown('<p>fail</p>'),
-      { message: 'Offscreen document did not respond to convert-html' },
-    );
+    await ctx.htmlToMarkdown('<p>test</p>');
+
+    // Verify no convert-html was sent via sendMessage (port used instead)
+    const convertCalls = ctx._sendMessageCalls.filter(m => m.action === 'convert-html');
+    assert.equal(convertCalls.length, 0, 'should not use sendMessage for conversion');
   });
 });
 

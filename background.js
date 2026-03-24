@@ -1,25 +1,118 @@
-/* global sanitizeZipFilename, sanitizeZipPathSegment */
+/* global sanitizeZipFilename, sanitizeZipPathSegment, buildPageIndex, rewriteInternalLinks, replaceEmojis, escapeParensForMarkdown, pageToFilename, EMOJI_SHORTCODE_MAP */
 
 importScripts('utils.js', 'vendor/jszip.min.js', 'vendor/emoji-map.js');
 
 const PAGE_LIMIT = 50;
-const FETCH_CONCURRENCY = 5;
-const MSG_CHUNK_BYTES = 32 * 1024 * 1024; // 32 MiB — well under Chrome's 64 MiB sendMessage limit
+const FETCH_CONCURRENCY = 3;
+const RETRY_CONCURRENCY = 2;
+const MSG_CHUNK_BYTES = 32 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024; // 50 MB cap even when downloading
+const ATTACHMENT_TIMEOUT_MS = 5000; // 5s per attachment — enough for <100KB images
+
+function fetchWithTimeout(url, opts, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...opts, signal: controller.signal })
+    .finally(() => clearTimeout(timer));
+}
+
+// ── Export state (survives popup close/reopen) ──────────────────────────────
+
+let exportState = null;
+let exportAbort = null;
+let exportRunning = false;
+const activePorts = new Set();
+
+function setExportState(state) {
+  exportState = state;
+}
 
 function safePostMessage(port, msg) {
-  try {
-    port.postMessage(msg);
-  } catch {
-    // Port disconnected (popup closed) — nothing to report to.
+  if (msg.type === 'progress' || msg.type === 'done' || msg.type === 'error') {
+    setExportState(msg);
+  }
+  if (msg.type === 'done' || msg.type === 'error') {
+    setTimeout(() => { exportState = null; }, 30000);
+  }
+  try { port.postMessage(msg); } catch { /* popup closed */ }
+  for (const p of activePorts) {
+    if (p === port) continue;
+    try { p.postMessage(msg); } catch { activePorts.delete(p); }
   }
 }
 
+// ── Attachment skip tracking ────────────────────────────────────────────────
+
+let skippedAttachments = { count: 0, totalBytes: 0 };
+
+function resetSkippedAttachments() {
+  skippedAttachments = { count: 0, totalBytes: 0 };
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function doneMessage(total, skippedPages) {
+  const exported = total - (skippedPages || 0);
+  let msg = `Done! ${exported} pages exported.`;
+  if (skippedPages > 0) msg += ` ${skippedPages} skipped (timeout).`;
+  msg += skippedSummary();
+  return msg;
+}
+
+function skippedSummary() {
+  if (skippedAttachments.count === 0) return '';
+  return ` (skipped ${skippedAttachments.count} attachments, ${formatBytes(skippedAttachments.totalBytes)})`;
+}
+
+// ── Message routing ─────────────────────────────────────────────────────────
+
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'export') return;
-  port.onMessage.addListener(({ action, tabId, tabUrl }) => {
-    if (action === 'start') runExport(port, tabId, tabUrl);
+  activePorts.add(port);
+  port.onDisconnect.addListener(() => { activePorts.delete(port); });
+
+  port.onMessage.addListener((msg) => {
+    if (msg.action === 'get-status') {
+      if (exportState) {
+        try { port.postMessage(exportState); } catch { /* ignore */ }
+      }
+      return;
+    }
+    if (msg.action === 'cancel') {
+      if (exportAbort) {
+        exportAbort.abort();
+        exportAbort = null;
+      }
+      setExportState(null);
+      safePostMessage(port, { type: 'error', message: 'Export cancelled.' });
+      return;
+    }
+    const opts = {
+      skipAttachments: msg.skipAttachments ?? true,
+      maxAttachmentBytes: msg.maxAttachmentBytes ?? MAX_ATTACHMENT_BYTES,
+      preserveOrder: msg.preserveOrder ?? false,
+      incremental: msg.incremental ?? false,
+    };
+
+    if (msg.action === 'start') runExport(port, msg.tabId, msg.tabUrl, opts, msg.incremental);
+    if (msg.action === 'export-page') runExportPage(port, msg.tabId, msg.tabUrl, opts);
+    if (msg.action === 'export-selected') runExportSelected(port, msg.tabId, msg.tabUrl, msg.pageIds, opts);
+    if (msg.action === 'fetch-tree') {
+      if (exportRunning) {
+        // Don't load tree while export is running — would compete for Confluence API
+        try { port.postMessage({ type: 'tree-blocked' }); } catch { /* ignore */ }
+      } else {
+        fetchTreeForPopup(port, msg.tabId, msg.tabUrl);
+      }
+    }
   });
 });
+
+// ── Confluence detection & API ──────────────────────────────────────────────
 
 async function detectConfluenceContext(tabId, tabUrl) {
   const results = await chrome.scripting.executeScript({
@@ -28,15 +121,39 @@ async function detectConfluenceContext(tabId, tabUrl) {
     func: () => ({
       contextPath: globalThis.AJS?.contextPath?.() ?? '',
       spaceKey: globalThis.AJS?.Meta?.get?.('space-key') ?? null,
+      pageId: globalThis.AJS?.Meta?.get?.('page-id') ?? null,
+      pageTitle: globalThis.AJS?.Meta?.get?.('page-title') ?? null,
     }),
   });
-  const { contextPath, spaceKey } = results[0].result;
+  const { contextPath, spaceKey, pageId, pageTitle } = results[0].result;
   if (!spaceKey) throw new Error('Not a Confluence space page.');
   const { origin } = new URL(tabUrl);
-  return { baseUrl: origin + contextPath, spaceKey };
+  const baseUrl = origin + contextPath;
+
+  // Detect Cloud vs Server
+  const isCloud = await detectCloudApi(baseUrl);
+
+  return { baseUrl, spaceKey, pageId, pageTitle, isCloud };
 }
 
-async function fetchSpaceName(baseUrl, spaceKey) {
+async function detectCloudApi(baseUrl) {
+  try {
+    const res = await fetchWithTimeout(`${baseUrl}/wiki/api/v2/spaces?limit=1`, { credentials: 'include' }, 5000);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function fetchSpaceName(baseUrl, spaceKey, isCloud) {
+  if (isCloud) {
+    // Cloud v2: need to get space by key
+    const url = `${baseUrl}/wiki/api/v2/spaces?keys=${spaceKey}&limit=1`;
+    const res = await fetch(url, { credentials: 'include' });
+    if (res.status === 401) throw new Error('Session expired. Reload Confluence and retry.');
+    const data = await res.json();
+    return data.results?.[0]?.name ?? spaceKey;
+  }
   const url = `${baseUrl}/rest/api/space/${spaceKey}`;
   const res = await fetch(url, { credentials: 'include' });
   if (res.status === 401) throw new Error('Session expired. Reload Confluence and retry.');
@@ -44,7 +161,12 @@ async function fetchSpaceName(baseUrl, spaceKey) {
   return data.name;
 }
 
-async function fetchAllPages(baseUrl, spaceKey, onProgress) {
+async function fetchAllPages(baseUrl, spaceKey, isCloud, onProgress) {
+  if (isCloud) return fetchAllPagesCloud(baseUrl, spaceKey, onProgress);
+  return fetchAllPagesServer(baseUrl, spaceKey, onProgress);
+}
+
+async function fetchAllPagesServer(baseUrl, spaceKey, onProgress) {
   const pages = [];
   let start = 0;
   while (true) {
@@ -61,29 +183,258 @@ async function fetchAllPages(baseUrl, spaceKey, onProgress) {
   return pages;
 }
 
-async function fetchPageContent(baseUrl, pageId) {
-  const url = `${baseUrl}/rest/api/content/${pageId}?expand=body.view`;
+async function fetchAllPagesCloud(baseUrl, spaceKey, onProgress) {
+  // Cloud v2: first get space ID
+  const spaceRes = await fetch(`${baseUrl}/wiki/api/v2/spaces?keys=${spaceKey}&limit=1`, { credentials: 'include' });
+  if (spaceRes.status === 401) throw new Error('Session expired. Reload Confluence and retry.');
+  const spaceData = await spaceRes.json();
+  const spaceId = spaceData.results?.[0]?.id;
+  if (!spaceId) throw new Error(`Space "${spaceKey}" not found.`);
+
+  const pages = [];
+  let cursor = null;
+  while (true) {
+    let url = `${baseUrl}/wiki/api/v2/spaces/${spaceId}/pages?limit=50&sort=title`;
+    if (cursor) url += `&cursor=${cursor}`;
+    const res = await fetch(url, { credentials: 'include' });
+    if (res.status === 401) throw new Error('Session expired. Reload Confluence and retry.');
+    const data = await res.json();
+    // Normalize Cloud pages to match Server format
+    for (const p of data.results) {
+      pages.push({
+        id: p.id,
+        title: p.title,
+        ancestors: p.parentId ? [{ id: p.parentId, title: '' }] : [],
+        _cloudParentId: p.parentId,
+      });
+    }
+    onProgress(pages.length);
+    cursor = data._links?.next ? new URL(data._links.next, baseUrl).searchParams.get('cursor') : null;
+    if (!cursor) break;
+  }
+
+  // Build proper ancestors for Cloud pages
+  const pageMap = new Map(pages.map(p => [p.id, p]));
+  for (const page of pages) {
+    const ancestors = [];
+    let cur = page._cloudParentId;
+    while (cur && pageMap.has(cur)) {
+      const parent = pageMap.get(cur);
+      ancestors.unshift({ id: parent.id, title: parent.title });
+      cur = parent._cloudParentId;
+    }
+    page.ancestors = ancestors;
+    delete page._cloudParentId;
+  }
+
+  return pages;
+}
+
+async function fetchSinglePage(baseUrl, pageId) {
+  const url = `${baseUrl}/rest/api/content/${pageId}?expand=ancestors,body.view,version,metadata.labels`;
   const res = await fetch(url, { credentials: 'include' });
   if (res.status === 401) throw new Error('Session expired. Reload Confluence and retry.');
-  const data = await res.json();
-  return data.body?.view?.value ?? '';
+  return res.json();
 }
 
-const OFFSCREEN_RETRY_LIMIT = 10;
-const OFFSCREEN_RETRY_DELAY_MS = 100;
+const PAGE_FETCH_TIMEOUT_MS = 20000; // 20s to fetch a single page — Confluence Server is slow on complex pages
+
+async function fetchPageContent(baseUrl, pageId, isCloud) {
+  if (isCloud) {
+    const url = `${baseUrl}/wiki/api/v2/pages/${pageId}?body-format=storage`;
+    const res = await fetchWithTimeout(url, { credentials: 'include' }, PAGE_FETCH_TIMEOUT_MS);
+    if (res.status === 401) throw new Error('Session expired. Reload Confluence and retry.');
+    const data = await res.json();
+    return {
+      html: data.body?.storage?.value ?? '',
+      version: data.version?.number ?? null,
+      lastModified: data.version?.createdAt ?? null,
+      author: data.version?.authorId ?? null,
+      labels: [],
+    };
+  }
+  const url = `${baseUrl}/rest/api/content/${pageId}?expand=body.view,version,metadata.labels`;
+  const res = await fetchWithTimeout(url, { credentials: 'include' }, PAGE_FETCH_TIMEOUT_MS);
+  if (res.status === 401) throw new Error('Session expired. Reload Confluence and retry.');
+  const data = await res.json();
+  return {
+    html: data.body?.view?.value ?? '',
+    version: data.version?.number ?? null,
+    lastModified: data.version?.when ?? null,
+    author: data.version?.by?.displayName ?? null,
+    labels: (data.metadata?.labels?.results ?? []).map(l => l.name),
+  };
+}
+
+// ── Obsidian YAML frontmatter ───────────────────────────────────────────────
+
+function generateFrontmatter(page, meta) {
+  const lines = ['---'];
+  lines.push(`title: "${(page.title || 'Untitled').replace(/"/g, '\\"')}"`);
+  if (meta.lastModified) {
+    lines.push(`date: ${meta.lastModified.split('T')[0]}`);
+  }
+  lines.push(`confluence_id: "${page.id}"`);
+  if (meta.author) {
+    lines.push(`author: "${meta.author.replace(/"/g, '\\"')}"`);
+  }
+  if (meta.labels && meta.labels.length > 0) {
+    lines.push(`tags: [${meta.labels.map(l => `"${l}"`).join(', ')}]`);
+  }
+  if (page.ancestors && page.ancestors.length > 0) {
+    const parent = page.ancestors[page.ancestors.length - 1];
+    lines.push(`parent: "[[${parent.title.replace(/"/g, '\\"')}]]"`);
+  }
+  lines.push('---');
+  return lines.join('\n') + '\n\n';
+}
+
+// ── MOC (Map of Content) for Obsidian ───────────────────────────────────────
+
+function generateMOC(tree, spaceName) {
+  const lines = ['---', `title: "${spaceName} — Table of Contents"`, 'tags: ["MOC"]', '---', ''];
+  lines.push(`# ${spaceName}\n`);
+
+  function renderNode(node, depth) {
+    const indent = '  '.repeat(depth);
+    const link = `[[${node.title}]]`;
+    lines.push(`${indent}- ${link}`);
+    if (node.children) {
+      for (const child of node.children) {
+        renderNode(child, depth + 1);
+      }
+    }
+  }
+
+  for (const node of tree) {
+    renderNode(node, 0);
+  }
+
+  return lines.join('\n') + '\n';
+}
+
+// ── Page tree for popup ─────────────────────────────────────────────────────
+
+function buildTreeFromPages(pages) {
+  const map = new Map();
+  const roots = [];
+
+  for (const page of pages) {
+    map.set(page.id, {
+      id: page.id,
+      title: page.title,
+      parentId: page.ancestors?.length > 0
+        ? page.ancestors[page.ancestors.length - 1].id
+        : null,
+      children: [],
+    });
+  }
+
+  for (const node of map.values()) {
+    if (node.parentId && map.has(node.parentId)) {
+      map.get(node.parentId).children.push(node);
+    } else {
+      roots.push(node);
+    }
+  }
+
+  function sortTree(nodes) {
+    nodes.sort((a, b) => a.title.localeCompare(b.title));
+    for (const n of nodes) sortTree(n.children);
+  }
+  sortTree(roots);
+
+  return roots;
+}
+
+function serializeTree(nodes) {
+  return nodes.map(n => ({
+    id: n.id,
+    title: n.title,
+    children: serializeTree(n.children),
+  }));
+}
+
+async function fetchTreeForPopup(port, tabId, tabUrl) {
+  try {
+    const { baseUrl, spaceKey, pageId, isCloud } = await detectConfluenceContext(tabId, tabUrl);
+    const spaceName = await fetchSpaceName(baseUrl, spaceKey, isCloud);
+
+    safePostMessage(port, { type: 'tree-loading', message: 'Loading pages...' });
+
+    const pages = await fetchAllPages(baseUrl, spaceKey, isCloud, (count) => {
+      safePostMessage(port, { type: 'tree-loading', message: `Found ${count} pages...` });
+    });
+
+    const tree = buildTreeFromPages(pages);
+
+    safePostMessage(port, {
+      type: 'tree-data',
+      tree: serializeTree(tree),
+      spaceName,
+      spaceKey,
+      currentPageId: pageId,
+      totalPages: pages.length,
+    });
+  } catch (err) {
+    safePostMessage(port, { type: 'error', message: err.message });
+  }
+}
+
+// ── Offscreen document + port-based parallel conversion ─────────────────────
+
+let turndownPort = null;
+const turndownCallbacks = new Map(); // id → resolve
+let turndownIdCounter = 0;
+
+function getTurndownPort() {
+  if (turndownPort) return turndownPort;
+  turndownPort = chrome.runtime.connect({ name: 'turndown' });
+  turndownPort.onMessage.addListener((msg) => {
+    const cb = turndownCallbacks.get(msg.id);
+    if (cb) {
+      turndownCallbacks.delete(msg.id);
+      cb(msg);
+    }
+  });
+  turndownPort.onDisconnect.addListener(() => { turndownPort = null; });
+  return turndownPort;
+}
 
 async function htmlToMarkdown(html) {
-  for (let attempt = 0; attempt < OFFSCREEN_RETRY_LIMIT; attempt++) {
-    const response = await chrome.runtime.sendMessage({
-      action: 'convert-html',
-      html,
+  await ensureOffscreenDocument();
+  const port = getTurndownPort();
+  const id = ++turndownIdCounter;
+  return new Promise((resolve) => {
+    turndownCallbacks.set(id, (msg) => {
+      resolve(msg.markdown ?? '');
     });
-    if (response?.markdown !== undefined) return response.markdown;
-    await ensureOffscreenDocument();
-    await new Promise(r => setTimeout(r, OFFSCREEN_RETRY_DELAY_MS));
-  }
-  throw new Error('Offscreen document did not respond to convert-html');
+    port.postMessage({ id, html });
+  });
 }
+
+const OFFSCREEN_READY_LIMIT = 50;
+const OFFSCREEN_READY_DELAY_MS = 50;
+
+async function ensureOffscreenDocument() {
+  const existing = await chrome.offscreen.hasDocument();
+  if (!existing) {
+    turndownPort = null; // reset port on new document
+    await chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: [chrome.offscreen.Reason.BLOBS],
+      justification: 'HTML-to-Markdown conversion and zip download',
+    });
+  }
+  for (let i = 0; i < OFFSCREEN_READY_LIMIT; i++) {
+    const res = await chrome.runtime.sendMessage({ action: 'ping' });
+    if (res?.ready) return;
+    await new Promise(r => setTimeout(r, OFFSCREEN_READY_DELAY_MS));
+  }
+  throw new Error('Offscreen document failed to initialize');
+}
+
+// ── Attachments ─────────────────────────────────────────────────────────────
 
 const ATTACHMENT_SRC_RE = /\/download\/(attachments|thumbnails)\/\d+\/([^?"]+)/;
 
@@ -92,24 +443,23 @@ function reserveUniqueZipPath(localPath, pathsSeen) {
     pathsSeen.add(localPath);
     return localPath;
   }
-
   const dotIndex = localPath.lastIndexOf('.');
   const hasExtension = dotIndex > localPath.lastIndexOf('/');
   const basename = hasExtension ? localPath.slice(0, dotIndex) : localPath;
   const extension = hasExtension ? localPath.slice(dotIndex) : '';
   let suffix = 2;
   let candidate = `${basename}-${suffix}${extension}`;
-
   while (pathsSeen.has(candidate)) {
     suffix++;
     candidate = `${basename}-${suffix}${extension}`;
   }
-
   pathsSeen.add(candidate);
   return candidate;
 }
 
-async function downloadAttachments(html, baseUrl, zipFolderPath, zip) {
+async function downloadAttachments(html, baseUrl, zipFolderPath, zip, skipAttachments, maxBytes) {
+  if (skipAttachments) return html;
+  const limit = maxBytes || MAX_ATTACHMENT_BYTES;
   const urlsToDownload = new Map();
   const localPathsSeen = new Set();
 
@@ -129,81 +479,166 @@ async function downloadAttachments(html, baseUrl, zipFolderPath, zip) {
     urlsToDownload.set(fullUrl, { localPath, subdir, filename });
   }
 
-  for (const [originalUrl, { localPath }] of urlsToDownload) {
+  // Download all attachments in parallel (up to 6 concurrent)
+  const entries = Array.from(urlsToDownload.entries());
+  await Promise.all(entries.map(async ([originalUrl, { localPath }]) => {
     const absoluteUrl = originalUrl.startsWith('http')
       ? originalUrl
       : baseUrl + originalUrl.split('?')[0];
-    const res = await fetch(absoluteUrl, { credentials: 'include' });
-    if (res.ok) {
+    try {
+      const res = await fetchWithTimeout(absoluteUrl, { credentials: 'include' }, ATTACHMENT_TIMEOUT_MS);
+      if (!res.ok) return;
+      const contentLength = parseInt(res.headers.get('content-length') || '0', 10);
+      if (limit > 0 && contentLength > limit) {
+        skippedAttachments.count++;
+        skippedAttachments.totalBytes += contentLength;
+        return;
+      }
       const buffer = await res.arrayBuffer();
+      if (limit > 0 && buffer.byteLength > limit) {
+        skippedAttachments.count++;
+        skippedAttachments.totalBytes += buffer.byteLength;
+        return;
+      }
       zip.file(localPath, buffer, { binary: true });
+    } catch {
+      // Skip failed attachments
     }
-  }
+  }));
 
   let rewritten = html;
   for (const [originalUrl, { subdir, filename }] of urlsToDownload) {
     const relPath = `./${subdir}/${escapeParensForMarkdown(filename)}`;
     rewritten = rewritten.split(originalUrl).join(relPath);
   }
-
   return rewritten;
 }
 
-async function exportAllPages(pages, pageIndex, baseUrl, zip, port, doneOffset = 0, totalPages = pages.length) {
+// ── Export pages to ZIP ─────────────────────────────────────────────────────
+
+const PAGE_TIMEOUT_MS = 30000; // 30s max per page — includes fetch + convert + attachments
+
+function withTimeout(promise, ms, fallback) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('PAGE_TIMEOUT')), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
+    .catch(err => {
+      if (err.message === 'PAGE_TIMEOUT') return fallback;
+      throw err;
+    });
+}
+
+async function exportPages(pages, pageIndex, baseUrl, zip, port, isCloud, exportOpts, doneOffset = 0, totalPages = pages.length) {
   const total = totalPages;
   let done = doneOffset;
+  const failedPages = [];
 
-  for (let i = 0; i < pages.length; i += FETCH_CONCURRENCY) {
-    const batch = pages.slice(i, i + FETCH_CONCURRENCY);
-    await Promise.all(batch.map(async (page) => {
-      let html = await fetchPageContent(baseUrl, page.id);
-      const { zipPath } = pageIndex.get(page.id);
-      const zipFolder = zipPath.split('/').slice(0, -1).join('/');
-
-      html = rewriteInternalLinks(html, zipPath, pageIndex);
-      html = replaceEmojis(html, EMOJI_SHORTCODE_MAP);
-      html = await downloadAttachments(html, baseUrl, zipFolder, zip);
-
-      const markdown = await htmlToMarkdown(html);
-      zip.file(zipPath, markdown);
-      done++;
+  // Pass 1: process all pages with sliding window
+  await runPageQueue(pages, async (page) => {
+    const result = await withTimeout(processPage(page, pageIndex, baseUrl, zip, isCloud, exportOpts, port), PAGE_TIMEOUT_MS, null);
+    done++;
+    if (result === null) {
+      failedPages.push(page);
+      safePostMessage(port, { type: 'progress', current: done, total, message: `${page.title} (retry later)` });
+    } else {
       safePostMessage(port, { type: 'progress', current: done, total, message: page.title });
-    }));
+    }
+  });
+
+  // Pass 2: retry failed pages once
+  if (failedPages.length > 0 && !exportAbort?.signal?.aborted) {
+    safePostMessage(port, { type: 'progress', message: `Retrying ${failedPages.length} failed pages...` });
+    let retryDone = 0;
+    let skippedPages = 0;
+    await runPageQueue(failedPages, async (page) => {
+      const result = await withTimeout(processPage(page, pageIndex, baseUrl, zip, isCloud, exportOpts, port), PAGE_TIMEOUT_MS * 2, null);
+      retryDone++;
+      if (result === null) {
+        skippedPages++;
+        updateThread(port, page.id, page.title, 'timeout');
+      }
+      safePostMessage(port, { type: 'progress', current: retryDone, total: failedPages.length, message: `Retry: ${page.title}` });
+    }, RETRY_CONCURRENCY);
+    return skippedPages;
+  }
+  return 0;
+}
+
+async function runPageQueue(pages, handler, concurrency) {
+  const maxConcurrent = concurrency ?? FETCH_CONCURRENCY;
+  let nextIndex = 0;
+  const active = new Set();
+
+  function startNext() {
+    while (active.size < maxConcurrent && nextIndex < pages.length) {
+      if (exportAbort?.signal?.aborted) return;
+      const page = pages[nextIndex++];
+      const task = handler(page).finally(() => { active.delete(task); });
+      active.add(task);
+    }
+  }
+
+  startNext();
+  while (active.size > 0) {
+    if (exportAbort?.signal?.aborted) throw new Error('Export cancelled.');
+    await Promise.race(active);
+    startNext();
   }
 }
 
-const OFFSCREEN_READY_LIMIT = 50;
-const OFFSCREEN_READY_DELAY_MS = 50;
+// Active threads tracking for UI
+const activeThreads = new Map(); // pageId → { title, phase }
 
-async function ensureOffscreenDocument() {
-  const existing = await chrome.offscreen.hasDocument();
-  if (!existing) {
-    await chrome.offscreen.createDocument({
-      url: 'offscreen.html',
-      reasons: [chrome.offscreen.Reason.BLOBS],
-      justification: 'HTML-to-Markdown conversion and zip download',
-    });
+function updateThread(port, pageId, title, phase) {
+  if (phase === 'done' || phase === 'timeout') {
+    activeThreads.delete(pageId);
+  } else {
+    activeThreads.set(pageId, { title, phase });
   }
-  for (let i = 0; i < OFFSCREEN_READY_LIMIT; i++) {
-    const res = await chrome.runtime.sendMessage({ action: 'ping' });
-    if (res?.ready) return;
-    await new Promise(r => setTimeout(r, OFFSCREEN_READY_DELAY_MS));
-  }
-  throw new Error('Offscreen document failed to initialize');
+  const threads = Array.from(activeThreads.values());
+  safePostMessage(port, { type: 'threads', threads });
 }
 
-const ZIP_CHUNK_SIZE = 50;
+async function processPage(page, pageIndex, baseUrl, zip, isCloud, exportOpts, port) {
+  try {
+  updateThread(port, page.id, page.title, 'fetching');
+  const meta = await fetchPageContent(baseUrl, page.id, isCloud);
+  let html = meta.html;
+  const { zipPath } = pageIndex.get(page.id);
+  const zipFolder = zipPath.split('/').slice(0, -1).join('/');
+
+  html = rewriteInternalLinks(html, zipPath, pageIndex);
+  html = replaceEmojis(html, EMOJI_SHORTCODE_MAP);
+
+  if (!exportOpts.skipAttachments) {
+    updateThread(port, page.id, page.title, 'attachments');
+    html = await downloadAttachments(html, baseUrl, zipFolder, zip, exportOpts.skipAttachments, exportOpts.maxAttachmentBytes);
+  }
+
+  updateThread(port, page.id, page.title, 'converting');
+  const markdown = await htmlToMarkdown(html);
+  const frontmatter = generateFrontmatter(page, meta);
+  zip.file(zipPath, frontmatter + markdown);
+
+  updateThread(port, page.id, page.title, 'done');
+  return true;
+  } catch {
+    // Individual page failure — skip and continue export
+    updateThread(port, page.id, page.title, 'timeout');
+    return null;
+  }
+}
+
+// ── ZIP download ────────────────────────────────────────────────────────────
 
 async function triggerDownload(zip, filename) {
   const base64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE' });
   const chunkBytes = globalThis.__msgChunkBytes ?? MSG_CHUNK_BYTES;
 
   if (base64.length <= chunkBytes) {
-    await chrome.runtime.sendMessage({
-      action: 'trigger-download',
-      base64,
-      filename,
-    });
+    await chrome.runtime.sendMessage({ action: 'trigger-download', base64, filename });
   } else {
     for (let i = 0; i < base64.length; i += chunkBytes) {
       await chrome.runtime.sendMessage({
@@ -211,10 +646,7 @@ async function triggerDownload(zip, filename) {
         chunk: base64.slice(i, i + chunkBytes),
       });
     }
-    await chrome.runtime.sendMessage({
-      action: 'trigger-download-from-chunks',
-      filename,
-    });
+    await chrome.runtime.sendMessage({ action: 'trigger-download-from-chunks', filename });
   }
 }
 
@@ -222,52 +654,245 @@ function sanitizeSpaceName(spaceName) {
   return sanitizeZipPathSegment(spaceName, 'Confluence-Export');
 }
 
+// ── Incremental export ──────────────────────────────────────────────────────
+
+async function getLastExportDate(spaceKey) {
+  try {
+    const data = await chrome.storage.local.get([`lastExport_${spaceKey}`]);
+    return data[`lastExport_${spaceKey}`] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveLastExportDate(spaceKey) {
+  try {
+    await chrome.storage.local.set({ [`lastExport_${spaceKey}`]: new Date().toISOString() });
+  } catch { /* ignore */ }
+}
+
+// ── Export: Full space ──────────────────────────────────────────────────────
+
 const KEEPALIVE_INTERVAL_MS = 25000;
 
-async function runExport(port, tabId, tabUrl) {
-  const keepaliveId = setInterval(() => { chrome.runtime.getPlatformInfo(); }, KEEPALIVE_INTERVAL_MS);
+// Chrome alarms keepalive — prevents service worker termination even without popup
+async function startKeepalive() {
+  const id = setInterval(() => { chrome.runtime.getPlatformInfo(); }, KEEPALIVE_INTERVAL_MS);
+  try { await chrome.alarms.create('keepalive', { periodInMinutes: 0.4 }); } catch { /* alarms may not be available */ }
+  return id;
+}
+
+async function stopKeepalive(intervalId) {
+  clearInterval(intervalId);
+  try { await chrome.alarms.clear('keepalive'); } catch { /* ignore */ }
+}
+
+// Respond to alarm to keep service worker alive
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'keepalive') {
+    chrome.runtime.getPlatformInfo();
+  }
+});
+
+async function runExport(port, tabId, tabUrl, opts, incremental) {
+  exportAbort = new AbortController();
+  exportRunning = true;
+  const keepaliveId = await startKeepalive();
+  resetSkippedAttachments();
   try {
-  safePostMessage(port, { type: 'progress', message: 'Detecting space…' });
+    safePostMessage(port, { type: 'progress', message: 'Detecting space...' });
+    const { baseUrl, spaceKey, isCloud } = await detectConfluenceContext(tabId, tabUrl);
+    const spaceName = await fetchSpaceName(baseUrl, spaceKey, isCloud);
+    safePostMessage(port, { type: 'progress', message: 'Fetching page list...' });
 
-  const { baseUrl, spaceKey } = await detectConfluenceContext(tabId, tabUrl);
-  const spaceName = await fetchSpaceName(baseUrl, spaceKey);
-  safePostMessage(port, { type: 'progress', message: 'Fetching page list…' });
+    let pages = await fetchAllPages(baseUrl, spaceKey, isCloud, (count) => {
+      safePostMessage(port, { type: 'progress', message: `Found ${count} pages...` });
+    });
 
-  const pages = await fetchAllPages(baseUrl, spaceKey, (count) => {
-    safePostMessage(port, { type: 'progress', message: `Found ${count} pages…` });
-  });
+    // Incremental: filter pages modified since last export
+    let incrementalLabel = '';
+    if (incremental) {
+      const lastDate = await getLastExportDate(spaceKey);
+      if (lastDate) {
+        safePostMessage(port, { type: 'progress', message: `Filtering since ${lastDate.split('T')[0]}...` });
+        const filteredPages = [];
+        for (const page of pages) {
+          const meta = await fetchPageContent(baseUrl, page.id, isCloud);
+          if (meta.lastModified && meta.lastModified > lastDate) {
+            filteredPages.push(page);
+          }
+        }
+        incrementalLabel = ` (${filteredPages.length} changed since ${lastDate.split('T')[0]})`;
+        // Keep all pages for index building, but only export filtered
+        const allPages = pages;
+        pages = filteredPages;
+        if (pages.length === 0) {
+          await saveLastExportDate(spaceKey);
+          safePostMessage(port, { type: 'done', message: `No pages changed since ${lastDate.split('T')[0]}.` });
+          return;
+        }
+        // Build index with all pages for correct paths
+        const safeName = sanitizeSpaceName(spaceName);
+        const pageIndex = buildPageIndex(allPages, safeName, opts.preserveOrder);
+        const tree = buildTreeFromPages(allPages);
 
-  const safeName = sanitizeSpaceName(spaceName);
-  const pageIndex = buildPageIndex(pages, safeName);
+        await ensureOffscreenDocument();
+        const zip = new JSZip();
 
-  await ensureOffscreenDocument();
-  const chunks = [];
-  for (let i = 0; i < pages.length; i += ZIP_CHUNK_SIZE) {
-    chunks.push(pages.slice(i, i + ZIP_CHUNK_SIZE));
-  }
-  const totalChunks = chunks.length;
+        zip.file(`${safeName}/_index.md`, generateMOC(tree, spaceName));
 
-  let globalDone = 0;
-  for (let c = 0; c < totalChunks; c++) {
-    const chunk = chunks[c];
+        safePostMessage(port, { type: 'progress', message: `Exporting${incrementalLabel}...`, current: 0, total: pages.length });
+        const skipped = await exportPages(pages, pageIndex, baseUrl, zip, port, isCloud, opts, 0, pages.length);
+
+        safePostMessage(port, { type: 'progress', message: 'Building zip...' });
+        await triggerDownload(zip, `${safeName}-incremental.zip`);
+        await saveLastExportDate(spaceKey);
+        safePostMessage(port, { type: 'done', message: doneMessage(pages.length, skipped) + incrementalLabel });
+        return;
+      }
+    }
+
+    const safeName = sanitizeSpaceName(spaceName);
+    const pageIndex = buildPageIndex(pages, safeName, opts.preserveOrder);
+    const tree = buildTreeFromPages(pages);
+
+    await ensureOffscreenDocument();
+
     const zip = new JSZip();
-    const chunkLabel = totalChunks > 1 ? ` (part ${c + 1}/${totalChunks})` : '';
 
-    safePostMessage(port, { type: 'progress', message: `Exporting pages${chunkLabel}…`, current: globalDone, total: pages.length });
-    await exportAllPages(chunk, pageIndex, baseUrl, zip, port, globalDone, pages.length);
-    globalDone += chunk.length;
+    zip.file(`${safeName}/_index.md`, generateMOC(tree, spaceName));
 
-    const filename = totalChunks > 1
-      ? `${safeName}-${c + 1}.zip`
-      : `${safeName}.zip`;
-    safePostMessage(port, { type: 'progress', message: `Building zip${chunkLabel}…` });
-    await triggerDownload(zip, filename);
-  }
+    safePostMessage(port, { type: 'progress', message: 'Exporting pages...', current: 0, total: pages.length });
+    const skipped = await exportPages(pages, pageIndex, baseUrl, zip, port, isCloud, opts, 0, pages.length);
 
-  safePostMessage(port, { type: 'done', message: `Done! ${pages.length} pages in ${totalChunks} zip${totalChunks > 1 ? 's' : ''}` });
+    safePostMessage(port, { type: 'progress', message: 'Building zip...' });
+    await triggerDownload(zip, `${safeName}.zip`);
+    await saveLastExportDate(spaceKey);
+
+    safePostMessage(port, { type: 'done', message: doneMessage(pages.length, skipped) });
   } catch (err) {
     safePostMessage(port, { type: 'error', message: err.message });
   } finally {
-    clearInterval(keepaliveId);
+    exportRunning = false;
+    await stopKeepalive(keepaliveId);
+  }
+}
+
+// ── Export: Single page ─────────────────────────────────────────────────────
+
+async function runExportPage(port, tabId, tabUrl, opts) {
+  exportAbort = new AbortController();
+  exportRunning = true;
+  const keepaliveId = await startKeepalive();
+  resetSkippedAttachments();
+  try {
+    safePostMessage(port, { type: 'progress', message: 'Detecting page...' });
+    const { baseUrl, pageId, pageTitle } = await detectConfluenceContext(tabId, tabUrl);
+    if (!pageId) throw new Error('Cannot detect current page ID.');
+
+    await ensureOffscreenDocument();
+    safePostMessage(port, { type: 'progress', message: 'Exporting page...', current: 0, total: 1 });
+
+    const page = await fetchSinglePage(baseUrl, pageId);
+    const meta = {
+      html: page.body?.view?.value ?? '',
+      version: page.version?.number ?? null,
+      lastModified: page.version?.when ?? null,
+      author: page.version?.by?.displayName ?? null,
+      labels: (page.metadata?.labels?.results ?? []).map(l => l.name),
+    };
+
+    let html = meta.html;
+    const zip = new JSZip();
+    const filename = pageToFilename(pageTitle || page.title || 'page');
+    const pageIndex = new Map();
+    pageIndex.set(page.id, { title: page.title, zipPath: filename });
+
+    html = rewriteInternalLinks(html, filename, pageIndex);
+    html = replaceEmojis(html, EMOJI_SHORTCODE_MAP);
+    html = await downloadAttachments(html, baseUrl, '', zip, opts.skipAttachments, opts.maxAttachmentBytes);
+
+    const markdown = await htmlToMarkdown(html);
+    const frontmatter = generateFrontmatter(page, meta);
+    zip.file(filename, frontmatter + markdown);
+
+    safePostMessage(port, { type: 'progress', current: 1, total: 1, message: page.title });
+
+    const safeName = sanitizeZipPathSegment(pageTitle || 'page');
+    await triggerDownload(zip, `${safeName}.zip`);
+    safePostMessage(port, { type: 'done', message: `Page exported!${skippedSummary()}` });
+  } catch (err) {
+    safePostMessage(port, { type: 'error', message: err.message });
+  } finally {
+    exportRunning = false;
+    await stopKeepalive(keepaliveId);
+  }
+}
+
+// ── Export: Selected pages ──────────────────────────────────────────────────
+
+async function runExportSelected(port, tabId, tabUrl, pageIds, opts) {
+  exportAbort = new AbortController();
+  exportRunning = true;
+  const keepaliveId = await startKeepalive();
+  resetSkippedAttachments();
+  try {
+    if (!pageIds || pageIds.length === 0) throw new Error('No pages selected.');
+
+    safePostMessage(port, { type: 'progress', message: 'Detecting space...' });
+    const { baseUrl, spaceKey, isCloud } = await detectConfluenceContext(tabId, tabUrl);
+    const spaceName = await fetchSpaceName(baseUrl, spaceKey, isCloud);
+    safePostMessage(port, { type: 'progress', message: 'Fetching page list...' });
+
+    const allPages = await fetchAllPages(baseUrl, spaceKey, isCloud, (count) => {
+      safePostMessage(port, { type: 'progress', message: `Indexing ${count} pages...` });
+    });
+
+    const selectedSet = new Set(pageIds.map(String));
+    let selectedPages = allPages.filter(p => selectedSet.has(String(p.id)));
+
+    if (selectedPages.length === 0) throw new Error('None of the selected pages were found.');
+
+    // Incremental: filter to only pages changed since last export
+    let incrementalLabel = '';
+    if (opts.incremental) {
+      const lastDate = await getLastExportDate(spaceKey);
+      if (lastDate) {
+        safePostMessage(port, { type: 'progress', message: `Filtering since ${lastDate.split('T')[0]}...` });
+        const filtered = [];
+        for (const page of selectedPages) {
+          const meta = await fetchPageContent(baseUrl, page.id, isCloud);
+          if (meta.lastModified && meta.lastModified > lastDate) {
+            filtered.push(page);
+          }
+        }
+        incrementalLabel = ` (${filtered.length} changed)`;
+        selectedPages = filtered;
+        if (selectedPages.length === 0) {
+          await saveLastExportDate(spaceKey);
+          safePostMessage(port, { type: 'done', message: `No pages changed since ${lastDate.split('T')[0]}.` });
+          return;
+        }
+      }
+    }
+
+    const safeName = sanitizeSpaceName(spaceName);
+    const pageIndex = buildPageIndex(allPages, safeName, opts.preserveOrder);
+
+    await ensureOffscreenDocument();
+
+    const zip = new JSZip();
+    safePostMessage(port, { type: 'progress', message: `Exporting${incrementalLabel}...`, current: 0, total: selectedPages.length });
+    const skipped = await exportPages(selectedPages, pageIndex, baseUrl, zip, port, isCloud, opts, 0, selectedPages.length);
+
+    const zipName = selectedPages.length === allPages.length ? `${safeName}.zip` : `${safeName}-selected.zip`;
+    await triggerDownload(zip, zipName);
+    await saveLastExportDate(spaceKey);
+    safePostMessage(port, { type: 'done', message: doneMessage(selectedPages.length, skipped) });
+  } catch (err) {
+    safePostMessage(port, { type: 'error', message: err.message });
+  } finally {
+    exportRunning = false;
+    await stopKeepalive(keepaliveId);
   }
 }

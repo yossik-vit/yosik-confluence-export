@@ -12,6 +12,7 @@ const browserGlobals = {
 const offscreenGlobals = {
   TurndownService: 'readonly',
   turndownPluginGfm: 'readonly',
+  addConfluenceTurndownRules: 'readonly',
   setTimeout: 'readonly',
 };
 const swGlobals = {
@@ -27,6 +28,8 @@ const swGlobals = {
   setInterval: 'readonly',
   clearInterval: 'readonly',
   // from utils.js (loaded via importScripts)
+  sanitizeZipPathSegment: 'readonly',
+  sanitizeZipFilename: 'readonly',
   pageToFilename: 'readonly',
   pageToFolderName: 'readonly',
   buildPageIndex: 'readonly',
@@ -37,6 +40,8 @@ const swGlobals = {
   CONFLUENCE_EMOTICON_MAP: 'readonly',
   // from vendor/emoji-map.js (loaded via importScripts)
   EMOJI_SHORTCODE_MAP: 'readonly',
+  AbortController: 'readonly',
+  clearTimeout: 'readonly',
 };
 
 export default [
@@ -48,7 +53,7 @@ export default [
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'script',
-      globals: { ...chromeGlobal, ...browserGlobals },
+      globals: { ...chromeGlobal, ...browserGlobals, Event: 'readonly', Set: 'readonly', Array: 'readonly', setTimeout: 'readonly', clearTimeout: 'readonly', parseInt: 'readonly' },
     },
     rules: {
       'no-unused-vars': 'error',
@@ -63,7 +68,43 @@ export default [
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'script',
-      globals: { ...chromeGlobal, ...browserGlobals, ...offscreenGlobals },
+      globals: { ...chromeGlobal, ...browserGlobals, setTimeout: 'readonly', clearTimeout: 'readonly', Worker: 'readonly', Map: 'readonly', Promise: 'readonly' },
+    },
+    rules: {
+      'no-unused-vars': 'error',
+      'no-undef': 'error',
+      'eqeqeq': 'error',
+      'no-var': 'error',
+      'prefer-const': 'error',
+    },
+  },
+  {
+    files: ['turndown-worker.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'script',
+      globals: {
+        importScripts: 'readonly',
+        TurndownService: 'readonly',
+        turndownPluginGfm: 'readonly',
+        addConfluenceTurndownRules: 'readonly',
+        self: 'readonly',
+      },
+    },
+    rules: {
+      'no-unused-vars': 'error',
+      'no-undef': 'error',
+      'eqeqeq': 'error',
+      'no-var': 'error',
+      'prefer-const': 'error',
+    },
+  },
+  {
+    files: ['confluence-turndown-rules.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'script',
+      globals: { ...browserGlobals },
     },
     rules: {
       'no-unused-vars': 'error',

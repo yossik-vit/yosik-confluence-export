@@ -45,6 +45,7 @@ async function loadTree() {
 
       spaceInfo.hidden = false;
       spaceNameEl.textContent = `${msg.spaceName} (${msg.totalPages})`;
+      spaceNameEl.title = msg.spaceName;
 
       renderTree(msg.tree);
       treeLoading.hidden = true;
@@ -326,6 +327,7 @@ function handlePortMessage(msg) {
       if (!progressStartTime) progressStartTime = Date.now();
       const pct = Math.round((current / total) * 100);
       progressBar.style.width = `${pct}%`;
+      progressBar.setAttribute('aria-valuenow', pct);
       const elapsed = (Date.now() - progressStartTime) / 1000;
       const pagesPerSec = elapsed > 0 ? (current / elapsed).toFixed(1) : '—';
       const remaining = elapsed > 0 ? Math.round((total - current) / (current / elapsed)) : '—';
@@ -338,15 +340,18 @@ function handlePortMessage(msg) {
     status.className = 'status-text success';
     status.textContent = message ?? 'Done!';
     progressBar.style.width = '100%';
+    progressBar.setAttribute('aria-valuenow', 100);
     btnCancel.hidden = true;
     activeThreadsEl.hidden = true;
     btnExport.disabled = false;
+    exportInProgress = false;
   } else if (type === 'error') {
     status.className = 'status-text error';
     status.textContent = message ?? 'An error occurred.';
     btnCancel.hidden = true;
     activeThreadsEl.hidden = true;
     btnExport.disabled = false;
+    exportInProgress = false;
   }
 }
 
@@ -394,8 +399,11 @@ function renderThreads(threads) {
 }
 
 let activeExportPort = null;
+let exportInProgress = false;
 
 btnExport.addEventListener('click', async () => {
+  if (exportInProgress) return;
+  exportInProgress = true;
   btnExport.disabled = true;
   showProgress();
 
@@ -438,14 +446,30 @@ document.getElementById('btn-logs').addEventListener('click', async () => {
   port.postMessage({ action: 'get-logs' });
 });
 
-// ── Load tree on startup ────────────────────────────────────────────────────
-
-loadTree();
-
-// ── Restore export state on popup open ──────────────────────────────────────
+// ── Load tree on startup + restore export state ─────────────────────────────
 
 (async () => {
   try {
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const url = tab?.url ?? '';
+    const isConfluence = url.includes('/wiki/') ||
+      url.includes('/confluence/') ||
+      url.includes('/display/') ||
+      url.includes('/pages/') ||
+      url.includes('pageId=');
+
+    if (!isConfluence) {
+      treeLoading.querySelector('span').textContent = 'Откройте страницу Confluence для экспорта';
+      const spinner = treeLoading.querySelector('.spinner');
+      if (spinner) spinner.style.display = 'none';
+      btnExport.disabled = true;
+      return; // Don't load tree or check status
+    }
+
+    // Load tree
+    loadTree();
+
+    // Restore export state on popup open
     const statusPort = chrome.runtime.connect({ name: 'export' });
     activeExportPort = statusPort;
     statusPort.onMessage.addListener((msg) => {
@@ -460,22 +484,6 @@ loadTree();
       }
     });
     statusPort.postMessage({ action: 'get-status' });
-
-    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    if (!tab?.id) return;
-
-    const url = tab.url;
-    const isConfluence = url.includes('/wiki/') ||
-      url.includes('/confluence/') ||
-      url.includes('/display/') ||
-      url.includes('/pages/') ||
-      url.includes('pageId=');
-
-    if (!isConfluence) {
-      status.textContent = 'Open a Confluence page to export.';
-      status.className = 'status-text';
-      progressSection.hidden = false;
-    }
   } catch {
     // Ignore detection errors on popup open
   }

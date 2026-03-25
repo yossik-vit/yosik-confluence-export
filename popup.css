@@ -37,7 +37,7 @@
     --primary-light: rgba(123, 121, 232, 0.12);
     --primary-ring: rgba(123, 121, 232, 0.4);
     --foreground: #e5e5e5;
-    --foreground-muted: #a3a3a3;
+    --foreground-muted: #b0b0b0;
     --background: #1a1a1a;
     --surface: #262626;
     --border: #404040;
@@ -246,6 +246,7 @@ body {
 
 .tree-row.current-page {
   background: var(--primary-light);
+  border-left: 3px solid var(--primary);
 }
 
 .tree-toggle {
@@ -356,6 +357,8 @@ body {
 
 .setting-select:focus {
   border-color: var(--primary);
+  outline: 2px solid var(--primary-ring);
+  outline-offset: 1px;
 }
 
 /* ── Progress ────────────────────────────────────────────────────────────── */
@@ -540,4 +543,13 @@ body {
 
 .tree-container::-webkit-scrollbar-thumb:hover {
   background: var(--foreground-muted);
+}
+
+@media (prefers-color-scheme: dark) {
+  .tree-container::-webkit-scrollbar-thumb {
+    background: #525252;
+  }
+  .tree-container::-webkit-scrollbar-thumb:hover {
+    background: #737373;
+  }
 }

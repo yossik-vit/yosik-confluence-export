@@ -53,7 +53,7 @@ export default [
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'script',
-      globals: { ...chromeGlobal, ...browserGlobals, Event: 'readonly', Set: 'readonly', Array: 'readonly', setTimeout: 'readonly', clearTimeout: 'readonly', parseInt: 'readonly' },
+      globals: { ...chromeGlobal, ...browserGlobals, Event: 'readonly', Set: 'readonly', Array: 'readonly', setTimeout: 'readonly', clearTimeout: 'readonly', parseInt: 'readonly', navigator: 'readonly' },
     },
     rules: {
       'no-unused-vars': 'error',

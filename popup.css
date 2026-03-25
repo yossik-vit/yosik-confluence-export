@@ -497,6 +497,25 @@ body {
   opacity: 0.5;
 }
 
+.btn-logs {
+  margin-left: auto;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--foreground-muted);
+  font-family: var(--font-sans);
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  opacity: 0.6;
+}
+
+.btn-logs:hover {
+  opacity: 1;
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
 /* ── Spinner ─────────────────────────────────────────────────────────────── */
 
 .spinner {

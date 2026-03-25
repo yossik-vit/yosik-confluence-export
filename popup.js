@@ -420,6 +420,22 @@ btnCancel.addEventListener('click', () => {
   }
 });
 
+// ── Copy logs ───────────────────────────────────────────────────────────────
+
+document.getElementById('btn-logs').addEventListener('click', async () => {
+  const port = chrome.runtime.connect({ name: 'export' });
+  port.onMessage.addListener((msg) => {
+    if (msg.type === 'logs') {
+      const text = msg.logs.map(e => `${e.t} [${e.l}] ${e.m}${e.d ? ' ' + JSON.stringify(e.d) : ''}`).join('\n');
+      navigator.clipboard.writeText(text).then(() => {
+        document.getElementById('btn-logs').textContent = 'copied!';
+        setTimeout(() => { document.getElementById('btn-logs').textContent = 'logs'; }, 2000);
+      });
+    }
+  });
+  port.postMessage({ action: 'get-logs' });
+});
+
 // ── Load tree on startup ────────────────────────────────────────────────────
 
 loadTree();

@@ -2,6 +2,27 @@
 
 importScripts('utils.js', 'vendor/jszip.min.js', 'vendor/emoji-map.js');
 
+// ── Debug log ───────────────────────────────────────────────────────────────
+
+const LOG_MAX = 2000;
+const logBuffer = [];
+
+function log(level, msg, data) {
+  const entry = {
+    t: new Date().toISOString().slice(11, 23), // HH:mm:ss.SSS
+    l: level,
+    m: msg,
+    ...(data !== undefined ? { d: data } : {}),
+  };
+  logBuffer.push(entry);
+  if (logBuffer.length > LOG_MAX) logBuffer.shift();
+  if (level === 'error') {
+    console.error(`[yosik] ${msg}`, data ?? '');
+  } else {
+    console.log(`[yosik] ${msg}`, data ?? '');
+  }
+}
+
 const PAGE_LIMIT = 50;
 const FETCH_CONCURRENCY = 5;
 const FETCH_TIMEOUT_MS = 30000;
@@ -79,6 +100,10 @@ chrome.runtime.onConnect.addListener((port) => {
       if (exportState) {
         try { port.postMessage(exportState); } catch { /* ignore */ }
       }
+      return;
+    }
+    if (msg.action === 'get-logs') {
+      try { port.postMessage({ type: 'logs', logs: logBuffer.slice(-500) }); } catch { /* ignore */ }
       return;
     }
     if (msg.action === 'cancel') {
@@ -513,7 +538,13 @@ async function downloadAttachments(html, baseUrl, zipFolderPath, zip, maxBytes) 
 // ── Export pages to ZIP ─────────────────────────────────────────────────────
 
 async function processPage(page, pageIndex, baseUrl, zip, isCloud, exportOpts) {
+  const t0 = Date.now();
+  log('info', `page:start "${page.title}"`, { id: page.id });
+
   const meta = await fetchPageContent(baseUrl, page.id, isCloud);
+  const htmlLen = (meta.html || '').length;
+  log('info', `page:fetched "${page.title}"`, { htmlLen, ms: Date.now() - t0 });
+
   let html = meta.html;
   const { zipPath } = pageIndex.get(page.id);
   const zipFolder = zipPath.split('/').slice(0, -1).join('/');
@@ -522,12 +553,22 @@ async function processPage(page, pageIndex, baseUrl, zip, isCloud, exportOpts) {
   html = replaceEmojis(html, EMOJI_SHORTCODE_MAP);
 
   if (!exportOpts.skipAttachments) {
+    const ta = Date.now();
     html = await downloadAttachments(html, baseUrl, zipFolder, zip, exportOpts.maxAttachmentBytes);
+    log('info', `page:attachments "${page.title}"`, { ms: Date.now() - ta });
   }
 
+  const tc = Date.now();
   const markdown = await htmlToMarkdown(html);
+  log('info', `page:converted "${page.title}"`, { mdLen: markdown.length, ms: Date.now() - tc });
+
+  if (markdown.length === 0) {
+    log('error', `page:EMPTY markdown! "${page.title}"`, { htmlLen, zipPath });
+  }
+
   const frontmatter = generateFrontmatter(page, meta);
   zip.file(zipPath, frontmatter + markdown);
+  log('info', `page:done "${page.title}"`, { totalMs: Date.now() - t0, zipPath });
 }
 
 async function exportPages(pages, pageIndex, baseUrl, zip, port, isCloud, exportOpts, doneOffset = 0, totalPages = pages.length) {
@@ -546,9 +587,10 @@ async function exportPages(pages, pageIndex, baseUrl, zip, port, isCloud, export
           done++;
           safePostMessage(port, { type: 'progress', current: done, total });
         })
-        .catch(() => {
+        .catch((err) => {
           done++;
           failed++;
+          log('error', `page:FAILED "${page.title}"`, { error: err.message, id: page.id });
           safePostMessage(port, { type: 'progress', current: done, total });
         })
         .finally(() => { active.delete(task); });
@@ -633,6 +675,7 @@ async function runExport(port, tabId, tabUrl, opts, incremental) {
   exportRunning = true;
   const keepaliveId = await startKeepalive();
   resetSkippedAttachments();
+  log('info', 'export:start (full space)', { opts, incremental });
   try {
     safePostMessage(port, { type: 'progress', message: 'Detecting space...' });
     const { baseUrl, spaceKey, isCloud } = await detectConfluenceContext(tabId, tabUrl);
@@ -772,6 +815,7 @@ async function runExportSelected(port, tabId, tabUrl, pageIds, opts) {
   exportRunning = true;
   const keepaliveId = await startKeepalive();
   resetSkippedAttachments();
+  log('info', 'export:start (selected)', { pageCount: pageIds?.length, opts });
   try {
     if (!pageIds || pageIds.length === 0) throw new Error('No pages selected.');
 

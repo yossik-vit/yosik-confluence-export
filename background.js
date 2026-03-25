@@ -172,7 +172,8 @@ async function detectCloudApi(baseUrl) {
   try {
     const res = await fetchWithTimeout(`${baseUrl}/wiki/api/v2/spaces?limit=1`, { credentials: 'include' }, 5000);
     return res.ok;
-  } catch {
+  } catch (err) {
+    log('info', 'cloud:detect failed (assuming Server)', { error: err.message });
     return false;
   }
 }
@@ -199,6 +200,7 @@ async function fetchAllPages(baseUrl, spaceKey, isCloud, onProgress) {
 }
 
 async function fetchAllPagesServer(baseUrl, spaceKey, onProgress) {
+  const MAX_PAGES = 10000;
   const pages = [];
   let start = 0;
   while (true) {
@@ -210,6 +212,7 @@ async function fetchAllPagesServer(baseUrl, spaceKey, onProgress) {
     pages.push(...data.results);
     onProgress(pages.length);
     if (!data._links?.next) break;
+    if (pages.length >= MAX_PAGES) break;
     start += data.results.length;
   }
   return pages;
@@ -223,6 +226,7 @@ async function fetchAllPagesCloud(baseUrl, spaceKey, onProgress) {
   const spaceId = spaceData.results?.[0]?.id;
   if (!spaceId) throw new Error(`Space "${spaceKey}" not found.`);
 
+  const MAX_PAGES = 10000;
   const pages = [];
   let cursor = null;
   while (true) {
@@ -243,6 +247,7 @@ async function fetchAllPagesCloud(baseUrl, spaceKey, onProgress) {
     onProgress(pages.length);
     cursor = data._links?.next ? new URL(data._links.next, baseUrl).searchParams.get('cursor') : null;
     if (!cursor) break;
+    if (pages.length >= MAX_PAGES) break;
   }
 
   // Build proper ancestors for Cloud pages
@@ -561,8 +566,8 @@ async function downloadAttachments(html, baseUrl, zipFolderPath, zip, maxBytes) 
         return;
       }
       zip.file(localPath, buffer, { binary: true });
-    } catch {
-      // Skip failed attachments
+    } catch (err) {
+      log('warn', 'attachment:failed', { url: absoluteUrl, error: err.message });
     }
   }, ATTACH_CONCURRENCY);
 
@@ -675,7 +680,8 @@ async function getLastExportDate(spaceKey) {
   try {
     const data = await chrome.storage.local.get([`lastExport_${spaceKey}`]);
     return data[`lastExport_${spaceKey}`] ?? null;
-  } catch {
+  } catch (err) {
+    log('warn', 'storage:read failed', { error: err.message });
     return null;
   }
 }
@@ -683,7 +689,9 @@ async function getLastExportDate(spaceKey) {
 async function saveLastExportDate(spaceKey) {
   try {
     await chrome.storage.local.set({ [`lastExport_${spaceKey}`]: new Date().toISOString() });
-  } catch { /* ignore */ }
+  } catch (err) {
+    log('warn', 'storage:write failed', { error: err.message });
+  }
 }
 
 // ── Export: Full space ──────────────────────────────────────────────────────
@@ -734,7 +742,7 @@ async function runExport(port, tabId, tabUrl, opts, incremental) {
         const filteredPages = [];
         for (const page of pages) {
           const modified = page.version?.when ?? page.version?.createdAt;
-          if (modified && modified > lastDate) {
+          if (modified && new Date(modified) > new Date(lastDate)) {
             filteredPages.push(page);
           }
         }
@@ -875,7 +883,7 @@ async function runExportSelected(port, tabId, tabUrl, pageIds, opts) {
         const filtered = [];
         for (const page of selectedPages) {
           const modified = page.version?.when ?? page.version?.createdAt;
-          if (modified && modified > lastDate) {
+          if (modified && new Date(modified) > new Date(lastDate)) {
             filtered.push(page);
           }
         }

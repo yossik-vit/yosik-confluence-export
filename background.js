@@ -740,7 +740,15 @@ async function exportPages(pages, pageIndex, baseUrl, zip, port, isCloud, export
           done++;
           failed++;
           log('error', `page:FAILED "${page.title}"`, { error: err.message, id: page.id });
+          // Write stub for failed pages so folder notes aren't missing
+          const entry = pageIndex.get(page.id);
+          if (entry) {
+            const stub = `---\ntitle: "${page.title.replace(/"/g, '\\"')}"\nconfluence_id: "${page.id}"\n---\n\n# ${page.title}\n\n> **Export failed:** ${err.message}\n`;
+            zip.file(entry.zipPath, stub);
+          }
           safePostMessage(port, { type: 'progress', current: done, total });
+          // Cooldown after failure — server needs recovery time
+          return new Promise(r => setTimeout(r, 3000));
         })
         .finally(() => { active.delete(task); });
       active.add(task);
@@ -825,6 +833,8 @@ async function exportChunked(pages, allPages, pageIndex, baseUrl, spaceName, saf
     safePostMessage(port, { type: 'progress', message: `Exporting pages${chunkLabel}...`, current: globalDone, total: pages.length });
 
     const skipped = await exportPages(chunk, pageIndex, baseUrl, zip, port, isCloud, opts, globalDone, pages.length);
+    // Check abort BEFORE downloading — Cancel means don't download
+    if (exportAbort?.signal?.aborted) throw new Error('Export cancelled.');
     globalDone += chunk.length;
     totalSkipped += skipped;
 

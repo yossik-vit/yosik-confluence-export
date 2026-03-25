@@ -36,10 +36,17 @@ async function loadTree() {
   if (!tab?.id) return;
   const port = chrome.runtime.connect({ name: 'export' });
 
+  const treeTimeout = setTimeout(() => {
+    treeLoading.querySelector('span').textContent = 'Не удалось загрузить дерево. Обновите страницу Confluence.';
+    const spinner = treeLoading.querySelector('.spinner');
+    if (spinner) spinner.style.display = 'none';
+  }, 15000);
+
   port.onMessage.addListener((msg) => {
     if (msg.type === 'tree-loading') {
       treeLoading.querySelector('span').textContent = msg.message;
     } else if (msg.type === 'tree-data') {
+      clearTimeout(treeTimeout);
       treeData = msg.tree;
       currentPageId = msg.currentPageId;
 
@@ -113,6 +120,12 @@ function applyTreeSearch(query) {
       }
     }
   });
+
+  // Scroll to first visible match
+  const firstVisible = treeContent.querySelector('.tree-node:not(.search-hidden)');
+  if (firstVisible) {
+    firstVisible.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
 }
 
 // ── Tree rendering ──────────────────────────────────────────────────────────
@@ -254,15 +267,21 @@ function updateExportButton() {
 
 btnSelectAll.addEventListener('click', () => {
   if (!treeData) return;
-  function selectAll(nodes) {
+  const searchQuery = treeSearch.value.trim().toLowerCase();
+  function selectVisible(nodes) {
     for (const n of nodes) {
+      // If search is active, only select nodes that aren't hidden
+      if (searchQuery) {
+        const nodeEl = treeContent.querySelector(`.tree-node[data-id="${n.id}"]`);
+        if (nodeEl && nodeEl.classList.contains('search-hidden')) continue;
+      }
       selectedPageIds.add(String(n.id));
       const cb = treeContent.querySelector(`input[data-id="${n.id}"]`);
       if (cb) cb.checked = true;
-      if (n.children) selectAll(n.children);
+      if (n.children) selectVisible(n.children);
     }
   }
-  selectAll(treeData);
+  selectVisible(treeData);
   updateSelectCount();
   updateExportButton();
 });
@@ -351,9 +370,9 @@ function handlePortMessage(msg) {
 }
 
 const PHASE_LABELS = {
-  fetching: 'fetch',
-  converting: 'md',
-  attachments: 'img',
+  fetching: '\u{1F4E5} fetch',
+  converting: '\u{1F504} md',
+  attachments: '\u{1F4CE} img',
 };
 
 function renderThreads(threads) {

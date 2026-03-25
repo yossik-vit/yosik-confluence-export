@@ -26,6 +26,12 @@
   --radius-sm: 4px;
   --radius-md: 6px;
   --font-sans: 'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --space-xs: 2px;
+  --space-sm: 4px;
+  --space: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
 }
 
 /* ── Dark mode ──────────────────────────────────────────────────────────── */

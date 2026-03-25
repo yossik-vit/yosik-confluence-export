@@ -33,6 +33,7 @@ async function loadTree() {
   treeContent.hidden = true;
 
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab?.id) return;
   const port = chrome.runtime.connect({ name: 'export' });
 
   port.onMessage.addListener((msg) => {
@@ -399,6 +400,7 @@ btnExport.addEventListener('click', async () => {
   showProgress();
 
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab?.id) return;
   const port = chrome.runtime.connect({ name: 'export' });
   activeExportPort = port;
   port.onMessage.addListener(handlePortMessage);
@@ -460,7 +462,7 @@ loadTree();
     statusPort.postMessage({ action: 'get-status' });
 
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    if (!tab?.url) return;
+    if (!tab?.id) return;
 
     const url = tab.url;
     const isConfluence = url.includes('/wiki/') ||

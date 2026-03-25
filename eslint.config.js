@@ -94,11 +94,26 @@ export default [
     },
   },
   {
-    files: ['background.js', 'utils.js'],
+    files: ['background.js'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'script',
       globals: { ...chromeGlobal, ...swGlobals },
+    },
+    rules: {
+      'no-unused-vars': 'error',
+      'no-undef': 'error',
+      'eqeqeq': 'error',
+      'no-var': 'error',
+      'prefer-const': 'error',
+    },
+  },
+  {
+    files: ['utils.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'script',
+      globals: {},  // utils.js is pure — no globals needed
     },
     rules: {
       'no-unused-vars': 'error',

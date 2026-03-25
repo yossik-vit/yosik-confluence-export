@@ -80,8 +80,9 @@ function log(level, msg, data) {
 
 const PAGE_LIMIT = 50;
 const ZIP_CHUNK_SIZE = 1000; // text-only exports fit in one ZIP; chunking only for huge spaces with attachments
-const FETCH_CONCURRENCY = 3;
+const FETCH_CONCURRENCY = 2;
 const FETCH_TIMEOUT_MS = 60000;
+const THROTTLE_MS = 200; // pause between page fetches to avoid overloading Confluence
 const ATTACH_TIMEOUT_MS = 10000;
 const MSG_CHUNK_BYTES = 32 * 1024 * 1024;
 
@@ -720,10 +721,12 @@ async function exportPages(pages, pageIndex, baseUrl, zip, port, isCloud, export
   let nextIndex = 0;
   const active = new Set();
 
-  function startNext() {
+  async function startNext() {
     while (active.size < FETCH_CONCURRENCY && nextIndex < pages.length) {
       if (exportAbort?.signal?.aborted) return;
       const page = pages[nextIndex++];
+      // Throttle: give Confluence server breathing room between requests
+      if (THROTTLE_MS > 0) await new Promise(r => setTimeout(r, THROTTLE_MS));
       const task = processPage(page, pageIndex, baseUrl, zip, isCloud, exportOpts)
         .then(() => {
           done++;
@@ -740,11 +743,11 @@ async function exportPages(pages, pageIndex, baseUrl, zip, port, isCloud, export
     }
   }
 
-  startNext();
+  await startNext();
   while (active.size > 0) {
     if (exportAbort?.signal?.aborted) throw new Error('Export cancelled.');
     await Promise.race(active);
-    startNext();
+    await startNext();
   }
   return failed;
 }

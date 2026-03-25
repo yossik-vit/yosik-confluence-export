@@ -127,6 +127,34 @@ function addConfluenceTurndownRules(turndown) {
     },
   });
 
+  // --- Content wrappers inside table cells — unwrap to plain content ---
+  // HTML: <div class="content-wrapper"><p>Text</p></div>
+  turndown.addRule('confluenceContentWrapper', {
+    filter(node) {
+      return (
+        node.nodeName === 'DIV' &&
+        node.classList.contains('content-wrapper')
+      );
+    },
+    replacement(content) {
+      return content;
+    },
+  });
+
+  // --- Confluence table wrapper — strip wrapper, let GFM handle the table ---
+  // HTML: <div class="table-wrap"><table class="confluenceTable">...</table></div>
+  turndown.addRule('confluenceTableWrapper', {
+    filter(node) {
+      return (
+        node.nodeName === 'DIV' &&
+        node.classList.contains('table-wrap')
+      );
+    },
+    replacement(content) {
+      return content;
+    },
+  });
+
   // --- Confluence table of contents macro → remove ---
   // HTML: <div class="toc-macro ...">...</div>
   turndown.addRule('confluenceToc', {

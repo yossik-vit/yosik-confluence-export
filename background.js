@@ -603,6 +603,8 @@ async function downloadAttachments(html, baseUrl, zipFolderPath, zip, maxBytes) 
     const match = fullUrl.match(ATTACHMENT_SRC_RE);
     if (!match) continue;
     const filename = sanitizeZipFilename(decodeURIComponent(match[2]));
+    // Skip user avatars — not useful in markdown export
+    if (filename.startsWith('user-avatar') || fullUrl.includes('/useravatar')) continue;
     const subdir = attr.toLowerCase() === 'src' ? 'images' : 'attachments';
     const localPath = reserveUniqueZipPath(
       zipFolderPath ? `${zipFolderPath}/${subdir}/${filename}` : `${subdir}/${filename}`,

@@ -254,13 +254,6 @@ async function fetchAllPagesCloud(baseUrl, spaceKey, onProgress) {
   return pages;
 }
 
-async function fetchSinglePage(baseUrl, pageId) {
-  const url = `${baseUrl}/rest/api/content/${pageId}?expand=ancestors,body.view,version,metadata.labels`;
-  const res = await fetch(url, { credentials: 'include' });
-  if (res.status === 401) throw new Error('Session expired. Reload Confluence and retry.');
-  return res.json();
-}
-
 async function fetchPageContent(baseUrl, pageId, isCloud) {
   if (isCloud) {
     const url = `${baseUrl}/wiki/api/v2/pages/${pageId}?body-format=storage`;
@@ -764,26 +757,20 @@ async function runExportPage(port, tabId, tabUrl, opts) {
   resetSkippedAttachments();
   try {
     safePostMessage(port, { type: 'progress', message: 'Detecting page...' });
-    const { baseUrl, pageId, pageTitle } = await detectConfluenceContext(tabId, tabUrl);
+    const { baseUrl, pageId, pageTitle, isCloud } = await detectConfluenceContext(tabId, tabUrl);
     if (!pageId) throw new Error('Cannot detect current page ID.');
 
     await ensureOffscreenDocument();
     safePostMessage(port, { type: 'progress', message: 'Exporting page...', current: 0, total: 1 });
 
-    const page = await fetchSinglePage(baseUrl, pageId);
-    const meta = {
-      html: page.body?.view?.value ?? '',
-      version: page.version?.number ?? null,
-      lastModified: page.version?.when ?? null,
-      author: page.version?.by?.displayName ?? null,
-      labels: (page.metadata?.labels?.results ?? []).map(l => l.name),
-    };
-
+    const meta = await fetchPageContent(baseUrl, pageId, isCloud);
     let html = meta.html;
     const zip = new JSZip();
-    const filename = pageToFilename(pageTitle || page.title || 'page');
+    const title = pageTitle || 'page';
+    const filename = pageToFilename(title);
+    const pageObj = { id: pageId, title, ancestors: [] };
     const pageIndex = new Map();
-    pageIndex.set(page.id, { title: page.title, zipPath: filename });
+    pageIndex.set(pageId, { title, zipPath: filename });
 
     html = rewriteInternalLinks(html, filename, pageIndex);
     html = replaceEmojis(html, EMOJI_SHORTCODE_MAP);
@@ -792,10 +779,10 @@ async function runExportPage(port, tabId, tabUrl, opts) {
     }
 
     const markdown = await htmlToMarkdown(html);
-    const frontmatter = generateFrontmatter(page, meta);
+    const frontmatter = generateFrontmatter(pageObj, meta);
     zip.file(filename, frontmatter + markdown);
 
-    safePostMessage(port, { type: 'progress', current: 1, total: 1, message: page.title });
+    safePostMessage(port, { type: 'progress', current: 1, total: 1, message: title });
 
     const safeName = sanitizeZipPathSegment(pageTitle || 'page');
     await triggerDownload(zip, `${safeName}.zip`);

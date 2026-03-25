@@ -2,6 +2,61 @@
 
 importScripts('utils.js', 'vendor/jszip.min.js', 'vendor/emoji-map.js');
 
+// ── Page cache (IndexedDB) ──────────────────────────────────────────────────
+
+const CACHE_DB_NAME = 'yosik-export-cache';
+const CACHE_DB_VERSION = 1;
+const CACHE_STORE = 'pages';
+
+function openCacheDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(CACHE_DB_NAME, CACHE_DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(CACHE_STORE)) {
+        db.createObjectStore(CACHE_STORE, { keyPath: 'id' });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function getCachedPage(pageId, version) {
+  try {
+    const db = await openCacheDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(CACHE_STORE, 'readonly');
+      const store = tx.objectStore(CACHE_STORE);
+      const req = store.get(pageId);
+      req.onsuccess = () => {
+        const entry = req.result;
+        if (entry && entry.version === version) {
+          resolve(entry); // { id, version, markdown, frontmatter }
+        } else {
+          resolve(null);
+        }
+      };
+      req.onerror = () => resolve(null);
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function setCachedPage(pageId, version, markdown, frontmatter) {
+  try {
+    const db = await openCacheDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(CACHE_STORE, 'readwrite');
+      const store = tx.objectStore(CACHE_STORE);
+      store.put({ id: pageId, version, markdown, frontmatter, ts: Date.now() });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    });
+  } catch { /* ignore cache write failures */ }
+}
+
 // ── Debug log ───────────────────────────────────────────────────────────────
 
 const LOG_MAX = 2000;
@@ -587,12 +642,22 @@ async function processPage(page, pageIndex, baseUrl, zip, isCloud, exportOpts) {
   log('info', `page:start "${page.title}"`, { id: page.id });
 
   const meta = await fetchPageContent(baseUrl, page.id, isCloud);
-  const htmlLen = (meta.html || '').length;
-  log('info', `page:fetched "${page.title}"`, { htmlLen, ms: Date.now() - t0 });
-
-  let html = meta.html;
   const { zipPath } = pageIndex.get(page.id);
   const zipFolder = zipPath.split('/').slice(0, -1).join('/');
+
+  // Check cache (only in text-only mode — attachments affect markdown output)
+  if (exportOpts.skipAttachments) {
+    const cached = await getCachedPage(String(page.id), meta.version);
+    if (cached) {
+      log('info', `page:cached "${page.title}"`, { ms: Date.now() - t0 });
+      zip.file(zipPath, cached.frontmatter + cached.markdown);
+      return;
+    }
+  }
+
+  let html = meta.html;
+  const htmlLen = html.length;
+  log('info', `page:fetched "${page.title}"`, { htmlLen, ms: Date.now() - t0 });
 
   html = rewriteInternalLinks(html, zipPath, pageIndex);
   html = replaceEmojis(html, EMOJI_SHORTCODE_MAP);
@@ -613,6 +678,12 @@ async function processPage(page, pageIndex, baseUrl, zip, isCloud, exportOpts) {
 
   const frontmatter = generateFrontmatter(page, meta);
   zip.file(zipPath, frontmatter + markdown);
+
+  // Save to cache in text-only mode (fire and forget)
+  if (exportOpts.skipAttachments) {
+    setCachedPage(String(page.id), meta.version, markdown, frontmatter);
+  }
+
   log('info', `page:done "${page.title}"`, { totalMs: Date.now() - t0, zipPath });
 }
 

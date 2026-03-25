@@ -42,6 +42,7 @@ const swGlobals = {
   EMOJI_SHORTCODE_MAP: 'readonly',
   AbortController: 'readonly',
   clearTimeout: 'readonly',
+  indexedDB: 'readonly',
 };
 
 export default [

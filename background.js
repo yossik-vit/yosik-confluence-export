@@ -3,11 +3,10 @@
 importScripts('utils.js', 'vendor/jszip.min.js', 'vendor/emoji-map.js');
 
 const PAGE_LIMIT = 50;
-const FETCH_CONCURRENCY = 3;
-const RETRY_CONCURRENCY = 2;
+const FETCH_CONCURRENCY = 5;
+const FETCH_TIMEOUT_MS = 30000;
+const ATTACH_TIMEOUT_MS = 10000;
 const MSG_CHUNK_BYTES = 32 * 1024 * 1024;
-const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024; // 50 MB cap even when downloading
-const ATTACHMENT_TIMEOUT_MS = 5000; // 5s per attachment — enough for <100KB images
 
 function fetchWithTimeout(url, opts, timeoutMs) {
   const controller = new AbortController();
@@ -93,7 +92,7 @@ chrome.runtime.onConnect.addListener((port) => {
     }
     const opts = {
       skipAttachments: msg.skipAttachments ?? true,
-      maxAttachmentBytes: msg.maxAttachmentBytes ?? MAX_ATTACHMENT_BYTES,
+      maxAttachmentBytes: msg.maxAttachmentBytes ?? 0,
       preserveOrder: msg.preserveOrder ?? false,
       incremental: msg.incremental ?? false,
     };
@@ -237,12 +236,10 @@ async function fetchSinglePage(baseUrl, pageId) {
   return res.json();
 }
 
-const PAGE_FETCH_TIMEOUT_MS = 20000; // 20s to fetch a single page — Confluence Server is slow on complex pages
-
 async function fetchPageContent(baseUrl, pageId, isCloud) {
   if (isCloud) {
     const url = `${baseUrl}/wiki/api/v2/pages/${pageId}?body-format=storage`;
-    const res = await fetchWithTimeout(url, { credentials: 'include' }, PAGE_FETCH_TIMEOUT_MS);
+    const res = await fetchWithTimeout(url, { credentials: 'include' }, FETCH_TIMEOUT_MS);
     if (res.status === 401) throw new Error('Session expired. Reload Confluence and retry.');
     const data = await res.json();
     return {
@@ -254,7 +251,7 @@ async function fetchPageContent(baseUrl, pageId, isCloud) {
     };
   }
   const url = `${baseUrl}/rest/api/content/${pageId}?expand=body.view,version,metadata.labels`;
-  const res = await fetchWithTimeout(url, { credentials: 'include' }, PAGE_FETCH_TIMEOUT_MS);
+  const res = await fetchWithTimeout(url, { credentials: 'include' }, FETCH_TIMEOUT_MS);
   if (res.status === 401) throw new Error('Session expired. Reload Confluence and retry.');
   const data = await res.json();
   return {
@@ -457,9 +454,8 @@ function reserveUniqueZipPath(localPath, pathsSeen) {
   return candidate;
 }
 
-async function downloadAttachments(html, baseUrl, zipFolderPath, zip, skipAttachments, maxBytes) {
-  if (skipAttachments) return html;
-  const limit = maxBytes || MAX_ATTACHMENT_BYTES;
+async function downloadAttachments(html, baseUrl, zipFolderPath, zip, maxBytes) {
+  const limit = maxBytes || 0;
   const urlsToDownload = new Map();
   const localPathsSeen = new Set();
 
@@ -486,7 +482,7 @@ async function downloadAttachments(html, baseUrl, zipFolderPath, zip, skipAttach
       ? originalUrl
       : baseUrl + originalUrl.split('?')[0];
     try {
-      const res = await fetchWithTimeout(absoluteUrl, { credentials: 'include' }, ATTACHMENT_TIMEOUT_MS);
+      const res = await fetchWithTimeout(absoluteUrl, { credentials: 'include' }, ATTACH_TIMEOUT_MS);
       if (!res.ok) return;
       const contentLength = parseInt(res.headers.get('content-length') || '0', 10);
       if (limit > 0 && contentLength > limit) {
@@ -516,66 +512,46 @@ async function downloadAttachments(html, baseUrl, zipFolderPath, zip, skipAttach
 
 // ── Export pages to ZIP ─────────────────────────────────────────────────────
 
-const PAGE_TIMEOUT_MS = 30000; // 30s max per page — includes fetch + convert + attachments
+async function processPage(page, pageIndex, baseUrl, zip, isCloud, exportOpts) {
+  const meta = await fetchPageContent(baseUrl, page.id, isCloud);
+  let html = meta.html;
+  const { zipPath } = pageIndex.get(page.id);
+  const zipFolder = zipPath.split('/').slice(0, -1).join('/');
 
-function withTimeout(promise, ms, fallback) {
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error('PAGE_TIMEOUT')), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
-    .catch(err => {
-      if (err.message === 'PAGE_TIMEOUT') return fallback;
-      throw err;
-    });
+  html = rewriteInternalLinks(html, zipPath, pageIndex);
+  html = replaceEmojis(html, EMOJI_SHORTCODE_MAP);
+
+  if (!exportOpts.skipAttachments) {
+    html = await downloadAttachments(html, baseUrl, zipFolder, zip, exportOpts.maxAttachmentBytes);
+  }
+
+  const markdown = await htmlToMarkdown(html);
+  const frontmatter = generateFrontmatter(page, meta);
+  zip.file(zipPath, frontmatter + markdown);
 }
 
 async function exportPages(pages, pageIndex, baseUrl, zip, port, isCloud, exportOpts, doneOffset = 0, totalPages = pages.length) {
   const total = totalPages;
   let done = doneOffset;
-  const failedPages = [];
-
-  // Pass 1: process all pages with sliding window
-  await runPageQueue(pages, async (page) => {
-    const result = await withTimeout(processPage(page, pageIndex, baseUrl, zip, isCloud, exportOpts, port), PAGE_TIMEOUT_MS, null);
-    done++;
-    if (result === null) {
-      failedPages.push(page);
-      safePostMessage(port, { type: 'progress', current: done, total, message: `${page.title} (retry later)` });
-    } else {
-      safePostMessage(port, { type: 'progress', current: done, total, message: page.title });
-    }
-  });
-
-  // Pass 2: retry failed pages once
-  if (failedPages.length > 0 && !exportAbort?.signal?.aborted) {
-    safePostMessage(port, { type: 'progress', message: `Retrying ${failedPages.length} failed pages...` });
-    let retryDone = 0;
-    let skippedPages = 0;
-    await runPageQueue(failedPages, async (page) => {
-      const result = await withTimeout(processPage(page, pageIndex, baseUrl, zip, isCloud, exportOpts, port), PAGE_TIMEOUT_MS * 2, null);
-      retryDone++;
-      if (result === null) {
-        skippedPages++;
-        updateThread(port, page.id, page.title, 'timeout');
-      }
-      safePostMessage(port, { type: 'progress', current: retryDone, total: failedPages.length, message: `Retry: ${page.title}` });
-    }, RETRY_CONCURRENCY);
-    return skippedPages;
-  }
-  return 0;
-}
-
-async function runPageQueue(pages, handler, concurrency) {
-  const maxConcurrent = concurrency ?? FETCH_CONCURRENCY;
+  let failed = 0;
   let nextIndex = 0;
   const active = new Set();
 
   function startNext() {
-    while (active.size < maxConcurrent && nextIndex < pages.length) {
+    while (active.size < FETCH_CONCURRENCY && nextIndex < pages.length) {
       if (exportAbort?.signal?.aborted) return;
       const page = pages[nextIndex++];
-      const task = handler(page).finally(() => { active.delete(task); });
+      const task = processPage(page, pageIndex, baseUrl, zip, isCloud, exportOpts)
+        .then(() => {
+          done++;
+          safePostMessage(port, { type: 'progress', current: done, total });
+        })
+        .catch(() => {
+          done++;
+          failed++;
+          safePostMessage(port, { type: 'progress', current: done, total });
+        })
+        .finally(() => { active.delete(task); });
       active.add(task);
     }
   }
@@ -586,49 +562,7 @@ async function runPageQueue(pages, handler, concurrency) {
     await Promise.race(active);
     startNext();
   }
-}
-
-// Active threads tracking for UI
-const activeThreads = new Map(); // pageId → { title, phase }
-
-function updateThread(port, pageId, title, phase) {
-  if (phase === 'done' || phase === 'timeout') {
-    activeThreads.delete(pageId);
-  } else {
-    activeThreads.set(pageId, { title, phase });
-  }
-  const threads = Array.from(activeThreads.values());
-  safePostMessage(port, { type: 'threads', threads });
-}
-
-async function processPage(page, pageIndex, baseUrl, zip, isCloud, exportOpts, port) {
-  try {
-  updateThread(port, page.id, page.title, 'fetching');
-  const meta = await fetchPageContent(baseUrl, page.id, isCloud);
-  let html = meta.html;
-  const { zipPath } = pageIndex.get(page.id);
-  const zipFolder = zipPath.split('/').slice(0, -1).join('/');
-
-  html = rewriteInternalLinks(html, zipPath, pageIndex);
-  html = replaceEmojis(html, EMOJI_SHORTCODE_MAP);
-
-  if (!exportOpts.skipAttachments) {
-    updateThread(port, page.id, page.title, 'attachments');
-    html = await downloadAttachments(html, baseUrl, zipFolder, zip, exportOpts.skipAttachments, exportOpts.maxAttachmentBytes);
-  }
-
-  updateThread(port, page.id, page.title, 'converting');
-  const markdown = await htmlToMarkdown(html);
-  const frontmatter = generateFrontmatter(page, meta);
-  zip.file(zipPath, frontmatter + markdown);
-
-  updateThread(port, page.id, page.title, 'done');
-  return true;
-  } catch {
-    // Individual page failure — skip and continue export
-    updateThread(port, page.id, page.title, 'timeout');
-    return null;
-  }
+  return failed;
 }
 
 // ── ZIP download ────────────────────────────────────────────────────────────
@@ -810,7 +744,9 @@ async function runExportPage(port, tabId, tabUrl, opts) {
 
     html = rewriteInternalLinks(html, filename, pageIndex);
     html = replaceEmojis(html, EMOJI_SHORTCODE_MAP);
-    html = await downloadAttachments(html, baseUrl, '', zip, opts.skipAttachments, opts.maxAttachmentBytes);
+    if (!opts.skipAttachments) {
+      html = await downloadAttachments(html, baseUrl, '', zip, opts.maxAttachmentBytes);
+    }
 
     const markdown = await htmlToMarkdown(html);
     const frontmatter = generateFrontmatter(page, meta);

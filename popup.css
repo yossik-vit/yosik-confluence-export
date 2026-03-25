@@ -342,14 +342,6 @@ body {
   gap: 8px;
 }
 
-.setting-label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  color: var(--foreground-muted);
-}
-
 .setting-select {
   padding: 2px 6px;
   border: 1px solid var(--border);

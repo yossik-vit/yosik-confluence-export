@@ -195,7 +195,7 @@ async function fetchAllPagesServer(baseUrl, spaceKey, onProgress) {
   let start = 0;
   while (true) {
     const url = `${baseUrl}/rest/api/content?spaceKey=${spaceKey}&type=page` +
-      `&expand=ancestors&limit=${PAGE_LIMIT}&start=${start}`;
+      `&expand=ancestors,version&limit=${PAGE_LIMIT}&start=${start}`;
     const res = await fetch(url, { credentials: 'include' });
     if (res.status === 401) throw new Error('Session expired. Reload Confluence and retry.');
     const data = await res.json();
@@ -467,6 +467,25 @@ async function ensureOffscreenDocument() {
   throw new Error('Offscreen document failed to initialize');
 }
 
+// ── Concurrency limiter ──────────────────────────────────────────────────────
+
+async function limitConcurrency(items, fn, limit) {
+  let i = 0;
+  const active = new Set();
+  function next() {
+    while (active.size < limit && i < items.length) {
+      const item = items[i++];
+      const p = fn(item).finally(() => { active.delete(p); });
+      active.add(p);
+    }
+  }
+  next();
+  while (active.size > 0) {
+    await Promise.race(active);
+    next();
+  }
+}
+
 // ── Attachments ─────────────────────────────────────────────────────────────
 
 const ATTACHMENT_SRC_RE = /\/download\/(attachments|thumbnails)\/\d+\/([^?"]+)/;
@@ -511,9 +530,10 @@ async function downloadAttachments(html, baseUrl, zipFolderPath, zip, maxBytes) 
     urlsToDownload.set(fullUrl, { localPath, subdir, filename });
   }
 
-  // Download all attachments in parallel (up to 6 concurrent)
+  // Download attachments with limited concurrency
+  const ATTACH_CONCURRENCY = 4;
   const entries = Array.from(urlsToDownload.entries());
-  await Promise.all(entries.map(async ([originalUrl, { localPath }]) => {
+  await limitConcurrency(entries, async ([originalUrl, { localPath }]) => {
     const absoluteUrl = originalUrl.startsWith('http')
       ? originalUrl
       : baseUrl + originalUrl.split('?')[0];
@@ -536,7 +556,7 @@ async function downloadAttachments(html, baseUrl, zipFolderPath, zip, maxBytes) 
     } catch {
       // Skip failed attachments
     }
-  }));
+  }, ATTACH_CONCURRENCY);
 
   let rewritten = html;
   for (const [originalUrl, { subdir, filename }] of urlsToDownload) {
@@ -705,8 +725,8 @@ async function runExport(port, tabId, tabUrl, opts, incremental) {
         safePostMessage(port, { type: 'progress', message: `Filtering since ${lastDate.split('T')[0]}...` });
         const filteredPages = [];
         for (const page of pages) {
-          const meta = await fetchPageContent(baseUrl, page.id, isCloud);
-          if (meta.lastModified && meta.lastModified > lastDate) {
+          const modified = page.version?.when ?? page.version?.createdAt;
+          if (modified && modified > lastDate) {
             filteredPages.push(page);
           }
         }
@@ -846,8 +866,8 @@ async function runExportSelected(port, tabId, tabUrl, pageIds, opts) {
         safePostMessage(port, { type: 'progress', message: `Filtering since ${lastDate.split('T')[0]}...` });
         const filtered = [];
         for (const page of selectedPages) {
-          const meta = await fetchPageContent(baseUrl, page.id, isCloud);
-          if (meta.lastModified && meta.lastModified > lastDate) {
+          const modified = page.version?.when ?? page.version?.createdAt;
+          if (modified && modified > lastDate) {
             filtered.push(page);
           }
         }

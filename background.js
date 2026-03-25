@@ -282,12 +282,12 @@ async function fetchPageContent(baseUrl, pageId, isCloud) {
       labels: [],
     };
   }
-  const url = `${baseUrl}/rest/api/content/${pageId}?expand=body.view,version,metadata.labels`;
+  const url = `${baseUrl}/rest/api/content/${pageId}?expand=body.export_view,version,metadata.labels`;
   const res = await fetchWithTimeout(url, { credentials: 'include' }, FETCH_TIMEOUT_MS);
   if (res.status === 401) throw new Error('Session expired. Reload Confluence and retry.');
   const data = await res.json();
   return {
-    html: data.body?.view?.value ?? '',
+    html: data.body?.export_view?.value ?? data.body?.view?.value ?? '',
     version: data.version?.number ?? null,
     lastModified: data.version?.when ?? null,
     author: data.version?.by?.displayName ?? null,
@@ -500,6 +500,17 @@ async function limitConcurrency(items, fn, limit) {
   }
 }
 
+// ── HTML pre-cleaning (strip Confluence bloat before Turndown) ──────────────
+
+function cleanHtmlForTurndown(html) {
+  return html
+    .replace(/\s+style="[^"]*"/gi, '')
+    .replace(/\s+data-[a-z-]+="[^"]*"/gi, '')
+    .replace(/<span>([^<]*)<\/span>/gi, '$1')
+    .replace(/src="data:image\/[^"]+"/gi, 'src=""')
+    .replace(/\n{3,}/g, '\n\n');
+}
+
 // ── Attachments ─────────────────────────────────────────────────────────────
 
 const ATTACHMENT_SRC_RE = /\/download\/(attachments|thumbnails)\/\d+\/([^?"]+)/;
@@ -588,9 +599,11 @@ async function processPage(page, pageIndex, baseUrl, zip, isCloud, exportOpts) {
 
   const meta = await fetchPageContent(baseUrl, page.id, isCloud);
   const htmlLen = (meta.html || '').length;
-  log('info', `page:fetched "${page.title}"`, { htmlLen, ms: Date.now() - t0 });
 
   let html = meta.html;
+  html = cleanHtmlForTurndown(html);
+  log('info', `page:fetched "${page.title}"`, { htmlLen, cleanLen: html.length, ms: Date.now() - t0 });
+
   const { zipPath } = pageIndex.get(page.id);
   const zipFolder = zipPath.split('/').slice(0, -1).join('/');
 
@@ -842,6 +855,7 @@ async function runExportPage(port, tabId, tabUrl, opts) {
 
     const meta = await fetchPageContent(baseUrl, pageId, isCloud);
     let html = meta.html;
+    html = cleanHtmlForTurndown(html);
     const zip = new JSZip();
     const title = pageTitle || 'page';
     const filename = pageToFilename(title);

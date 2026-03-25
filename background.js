@@ -79,7 +79,7 @@ function log(level, msg, data) {
 }
 
 const PAGE_LIMIT = 50;
-const ZIP_CHUNK_SIZE = 200;
+const ZIP_CHUNK_SIZE = 1000; // text-only exports fit in one ZIP; chunking only for huge spaces with attachments
 const FETCH_CONCURRENCY = 3;
 const FETCH_TIMEOUT_MS = 60000;
 const ATTACH_TIMEOUT_MS = 10000;

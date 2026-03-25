@@ -12,7 +12,8 @@ function buildMockContext() {
   const createdAnchors = [];
   const revokedUrls = [];
   let blobCounter = 0;
-  const listeners = [];
+  const messageListeners = [];
+  const connectListeners = [];
 
   const ctx = {
     // TurndownService stub
@@ -47,24 +48,14 @@ function buildMockContext() {
     },
     setTimeout(fn) { fn(); },
 
-    // Worker stub (turndown workers not needed for download tests)
-    Worker: class {
-      constructor() { this.onmessage = null; }
-      postMessage() {}
-      terminate() {}
-    },
-    Map,
-    Promise,
-    clearTimeout,
-
     // Chrome runtime stub
     chrome: {
       runtime: {
         onMessage: {
-          addListener(fn) { listeners.push(fn); },
+          addListener(fn) { messageListeners.push(fn); },
         },
         onConnect: {
-          addListener() {},
+          addListener(fn) { connectListeners.push(fn); },
         },
       },
     },
@@ -72,7 +63,8 @@ function buildMockContext() {
     // Expose test helpers
     _createdAnchors: createdAnchors,
     _revokedUrls: revokedUrls,
-    _listeners: listeners,
+    _messageListeners: messageListeners,
+    _connectListeners: connectListeners,
   };
 
   return ctx;
@@ -80,7 +72,7 @@ function buildMockContext() {
 
 function sendMessage(ctx, msg) {
   return new Promise((resolve) => {
-    for (const listener of ctx._listeners) {
+    for (const listener of ctx._messageListeners) {
       listener(msg, {}, resolve);
     }
   });
@@ -141,5 +133,46 @@ describe('offscreen trigger-download', () => {
 
     assert.equal(ctx._createdAnchors.length, 2);
     assert.equal(ctx._createdAnchors[1].download, 'b.zip');
+  });
+});
+
+describe('offscreen port-based turndown conversion', () => {
+  let ctx;
+
+  beforeEach(() => {
+    ctx = buildMockContext();
+    runInNewContext(offscreenSrc, ctx);
+  });
+
+  it('converts HTML to markdown via port message', () => {
+    assert.equal(ctx._connectListeners.length, 1);
+
+    const responses = [];
+    const fakePort = {
+      name: 'turndown',
+      onMessage: { addListener(fn) { fakePort._handler = fn; } },
+      postMessage(msg) { responses.push(msg); },
+    };
+
+    // Simulate port connection
+    ctx._connectListeners[0](fakePort);
+
+    // Send a conversion request
+    fakePort._handler({ id: 1, html: '<p>Hello</p>' });
+
+    assert.equal(responses.length, 1);
+    assert.equal(responses[0].id, 1);
+    // TurndownService stub returns html as-is
+    assert.equal(responses[0].markdown, '<p>Hello</p>');
+  });
+
+  it('ignores ports with wrong name', () => {
+    const fakePort = {
+      name: 'other',
+      onMessage: { addListener() {} },
+    };
+
+    // Should not throw
+    ctx._connectListeners[0](fakePort);
   });
 });

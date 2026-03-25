@@ -40,7 +40,7 @@ function buildMockContext(overrides = {}) {
     URL,
     console,
     AbortController,
-    fetch: overrides.fetch ?? (async () => ({ ok: true, status: 200, json: async () => ({}), arrayBuffer: async () => new ArrayBuffer(0) })),
+    fetch: overrides.fetch ?? (async () => ({ ok: true, status: 200, json: async () => ({}), arrayBuffer: async () => new ArrayBuffer(0), headers: { get: () => '0' } })),
     globalThis: {},
 
     // Chrome API mocks
@@ -55,7 +55,7 @@ function buildMockContext(overrides = {}) {
           return {
             name: opts?.name ?? 'unknown',
             postMessage(msg) {
-              // Simulate async worker response
+              // Simulate async response
               setTimeout(() => {
                 for (const fn of portListeners) {
                   fn({ id: msg.id, markdown: msg.html ?? '' });
@@ -93,6 +93,12 @@ function buildMockContext(overrides = {}) {
       scripting: {
         async executeScript() {
           return [{ result: { contextPath: '', spaceKey: 'TEST' } }];
+        },
+      },
+      storage: {
+        local: {
+          async get() { return {}; },
+          async set() {},
         },
       },
     },
@@ -179,21 +185,20 @@ describe('service worker keepalive during export', () => {
     const ctx = buildMockContext({
       fetch: async (url) => {
         if (url.includes('/rest/api/space/')) {
-          return { ok: true, status: 200, json: async () => ({ name: 'Test Space' }) };
+          return { ok: true, status: 200, json: async () => ({ name: 'Test Space' }), headers: { get: () => '0' } };
         }
         if (url.includes('/rest/api/content?')) {
-          return { ok: true, status: 200, json: async () => ({ results: [{ id: '1', title: 'Home', ancestors: [] }], _links: {} }) };
+          return { ok: true, status: 200, json: async () => ({ results: [{ id: '1', title: 'Home', ancestors: [] }], _links: {} }), headers: { get: () => '0' } };
         }
         if (url.includes('/rest/api/content/')) {
-          return { ok: true, status: 200, json: async () => ({ body: { view: { value: '<p>Hello</p>' } } }) };
+          return { ok: true, status: 200, json: async () => ({ body: { view: { value: '<p>Hello</p>' } } }), headers: { get: () => '0' } };
         }
-        return { ok: true, status: 200, json: async () => ({}), arrayBuffer: async () => new ArrayBuffer(0) };
+        return { ok: true, status: 200, json: async () => ({}), arrayBuffer: async () => new ArrayBuffer(0), headers: { get: () => '0' } };
       },
     });
-    // Responses for ensureOffscreenDocument ping + convert-html + trigger-download
+    // Responses for ensureOffscreenDocument ping + trigger-download
     ctx._sendMessageResponses.push(
       { ready: true },
-      { markdown: '# Home' },
       { ok: true },
     );
     runInNewContext(backgroundSrc + EXPOSE_INTERNALS, ctx);

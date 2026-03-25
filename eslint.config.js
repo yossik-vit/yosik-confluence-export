@@ -68,28 +68,7 @@ export default [
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'script',
-      globals: { ...chromeGlobal, ...browserGlobals, setTimeout: 'readonly', clearTimeout: 'readonly', Worker: 'readonly', Map: 'readonly', Promise: 'readonly' },
-    },
-    rules: {
-      'no-unused-vars': 'error',
-      'no-undef': 'error',
-      'eqeqeq': 'error',
-      'no-var': 'error',
-      'prefer-const': 'error',
-    },
-  },
-  {
-    files: ['turndown-worker.js'],
-    languageOptions: {
-      ecmaVersion: 2022,
-      sourceType: 'script',
-      globals: {
-        importScripts: 'readonly',
-        TurndownService: 'readonly',
-        turndownPluginGfm: 'readonly',
-        addConfluenceTurndownRules: 'readonly',
-        self: 'readonly',
-      },
+      globals: { ...chromeGlobal, ...browserGlobals, ...offscreenGlobals },
     },
     rules: {
       'no-unused-vars': 'error',

@@ -1,57 +1,49 @@
-// ── Worker pool for parallel Turndown conversion ────────────────────────────
+/* global TurndownService, turndownPluginGfm, addConfluenceTurndownRules */
 
-const WORKER_COUNT = 4;
-const WORKER_TIMEOUT_MS = 10000; // 10s — kill and respawn if stuck
-const workers = [];
-const pendingJobs = new Map(); // id → { resolve, timer, workerIndex }
-let jobIdCounter = 0;
-let workerRoundRobin = 0;
-
-function createWorker(index) {
-  const w = new Worker('turndown-worker.js');
-  w.onmessage = (e) => {
-    const { id, markdown, error } = e.data;
-    const job = pendingJobs.get(id);
-    if (job) {
-      clearTimeout(job.timer);
-      pendingJobs.delete(id);
-      job.resolve({ markdown: markdown ?? '', error });
-    }
-  };
-  workers[index] = w;
-  return w;
-}
-
-function ensureWorkers() {
-  if (workers.length > 0) return;
-  for (let i = 0; i < WORKER_COUNT; i++) {
-    createWorker(i);
-  }
-}
-
-function convertHtmlViaWorker(html) {
-  ensureWorkers();
-  const id = ++jobIdCounter;
-  const workerIndex = workerRoundRobin % WORKER_COUNT;
-  workerRoundRobin++;
-  const worker = workers[workerIndex];
-
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      // Worker stuck — kill, respawn, resolve with empty
-      pendingJobs.delete(id);
-      try { workers[workerIndex].terminate(); } catch { /* ignore */ }
-      createWorker(workerIndex);
-      resolve({ markdown: '', error: 'timeout' });
-    }, WORKER_TIMEOUT_MS);
-
-    pendingJobs.set(id, { resolve, timer, workerIndex });
-    worker.postMessage({ id, html });
+const turndown = (() => {
+  const td = new TurndownService({
+    headingStyle: 'atx',
+    codeBlockStyle: 'fenced',
+    bulletListMarker: '-',
   });
+  td.use(turndownPluginGfm.gfm);
+  addConfluenceTurndownRules(td);
+  return td;
+})();
+
+function fixMarkdownTables(md) {
+  const lines = md.split('\n');
+  const result = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const isTableRow = line.trimStart().startsWith('|') && line.trimEnd().endsWith('|') && line.includes('|', 1);
+    if (line.trim() === '|') continue;
+    if (isTableRow && i > 0) {
+      const prevLine = result[result.length - 1] ?? '';
+      const prevIsTable = prevLine.trimStart().startsWith('|') && prevLine.trimEnd().endsWith('|');
+      if (!prevIsTable && prevLine.trim() !== '') result.push('');
+    }
+    result.push(line);
+  }
+  return result.join('\n');
 }
 
-// ── Download helpers ────────────────────────────────────────────────────────
+// Port-based: background sends {id, html}, we reply {id, markdown}
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'turndown') return;
+  port.onMessage.addListener((msg) => {
+    const { id, html } = msg;
+    try {
+      let markdown = turndown.turndown(html);
+      markdown = fixMarkdownTables(markdown);
+      port.postMessage({ id, markdown });
+    } catch (err) {
+      port.postMessage({ id, markdown: '', error: err.message });
+    }
+  });
+});
 
+// sendMessage handler: ping + download triggers only
 const BLOB_REVOKE_DELAY_MS = 1000;
 
 function base64ToBlob(base64) {
@@ -74,20 +66,6 @@ function triggerAnchorDownload(base64, filename) {
 }
 
 let pendingChunks = [];
-
-// ── Port-based handler for parallel Turndown (no sendMessage queue) ─────────
-
-chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== 'turndown') return;
-  port.onMessage.addListener((msg) => {
-    const { id, html } = msg;
-    convertHtmlViaWorker(html).then(result => {
-      try { port.postMessage({ id, markdown: result.markdown, error: result.error }); } catch { /* port closed */ }
-    });
-  });
-});
-
-// ── Message handler (ping, downloads) ───────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.action === 'ping') {

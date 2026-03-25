@@ -80,8 +80,8 @@ function log(level, msg, data) {
 
 const PAGE_LIMIT = 50;
 const ZIP_CHUNK_SIZE = 200;
-const FETCH_CONCURRENCY = 5;
-const FETCH_TIMEOUT_MS = 30000;
+const FETCH_CONCURRENCY = 3;
+const FETCH_TIMEOUT_MS = 60000;
 const ATTACH_TIMEOUT_MS = 10000;
 const MSG_CHUNK_BYTES = 32 * 1024 * 1024;
 

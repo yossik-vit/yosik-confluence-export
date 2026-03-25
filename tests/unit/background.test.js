@@ -24,10 +24,22 @@ function buildMockContext(overrides = {}) {
   const intervals = [];
   let intervalIdCounter = 0;
   const clearedIntervals = [];
+  let timerIdCounter = 0;
+  const clearedTimers = new Set();
 
   const ctx = {
     importScripts() {},
-    setTimeout(fn) { fn(); return 0; },
+    setTimeout(fn, delay) {
+      const id = ++timerIdCounter;
+      if (delay && delay > 0) {
+        // Long timers (e.g. 30s timeout) — don't fire, just track
+        return id;
+      }
+      // Zero-delay timers fire immediately (preserves existing behaviour)
+      fn();
+      return id;
+    },
+    clearTimeout(id) { clearedTimers.add(id); },
     setInterval(fn, delay) {
       const id = ++intervalIdCounter;
       intervals.push({ id, fn, delay });

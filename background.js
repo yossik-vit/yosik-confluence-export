@@ -419,7 +419,14 @@ function getTurndownPort() {
       cb(msg);
     }
   });
-  turndownPort.onDisconnect.addListener(() => { turndownPort = null; });
+  turndownPort.onDisconnect.addListener(() => {
+    turndownPort = null;
+    // Reject all pending conversions so callers don't hang
+    for (const [, cb] of turndownCallbacks) {
+      cb({ markdown: '', error: 'port disconnected' });
+    }
+    turndownCallbacks.clear();
+  });
   return turndownPort;
 }
 
@@ -427,9 +434,18 @@ async function htmlToMarkdown(html) {
   await ensureOffscreenDocument();
   const port = getTurndownPort();
   const id = ++turndownIdCounter;
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      turndownCallbacks.delete(id);
+      reject(new Error('Turndown conversion timeout (30s)'));
+    }, 30000);
     turndownCallbacks.set(id, (msg) => {
-      resolve(msg.markdown ?? '');
+      clearTimeout(timer);
+      if (msg.error) {
+        reject(new Error(msg.error));
+      } else {
+        resolve(msg.markdown ?? '');
+      }
     });
     port.postMessage({ id, html });
   });
@@ -440,6 +456,7 @@ const OFFSCREEN_READY_DELAY_MS = 50;
 
 async function ensureOffscreenDocument() {
   const existing = await chrome.offscreen.hasDocument();
+  if (existing && turndownPort) return; // already ready, skip ping
   if (!existing) {
     turndownPort = null; // reset port on new document
     await chrome.offscreen.createDocument({
@@ -448,6 +465,7 @@ async function ensureOffscreenDocument() {
       justification: 'HTML-to-Markdown conversion and zip download',
     });
   }
+  // Only ping if we just created the document or port is missing
   for (let i = 0; i < OFFSCREEN_READY_LIMIT; i++) {
     const res = await chrome.runtime.sendMessage({ action: 'ping' });
     if (res?.ready) return;

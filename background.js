@@ -32,8 +32,16 @@ const MSG_CHUNK_BYTES = 32 * 1024 * 1024;
 function fetchWithTimeout(url, opts, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // Link to export-level abort so cancel interrupts in-flight requests
+  const onExportAbort = () => controller.abort();
+  if (exportAbort?.signal && !exportAbort.signal.aborted) {
+    exportAbort.signal.addEventListener('abort', onExportAbort);
+  }
   return fetch(url, { ...opts, signal: controller.signal })
-    .finally(() => clearTimeout(timer));
+    .finally(() => {
+      clearTimeout(timer);
+      exportAbort?.signal?.removeEventListener('abort', onExportAbort);
+    });
 }
 
 // ── Export state (survives popup close/reopen) ──────────────────────────────

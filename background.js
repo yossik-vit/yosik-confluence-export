@@ -83,6 +83,8 @@ const ZIP_CHUNK_SIZE = 1000; // text-only exports fit in one ZIP; chunking only 
 const FETCH_CONCURRENCY = 2;
 const FETCH_TIMEOUT_MS = 60000;
 const THROTTLE_MS = 200; // pause between page fetches to avoid overloading Confluence
+const BATCH_PAUSE_EVERY = 80; // pause every N pages
+const BATCH_PAUSE_MS = 10000; // 10s cooldown to let Confluence reset its connection pool
 const ATTACH_TIMEOUT_MS = 10000;
 const MSG_CHUNK_BYTES = 32 * 1024 * 1024;
 
@@ -729,6 +731,12 @@ async function exportPages(pages, pageIndex, baseUrl, zip, port, isCloud, export
     while (active.size < concurrency && nextIndex < pages.length) {
       if (exportAbort?.signal?.aborted) return;
       const page = pages[nextIndex++];
+      // Batch pause: every 80 pages, take a 10s break to let server recover
+      if (done > 0 && done % BATCH_PAUSE_EVERY === 0) {
+        log('info', `batch-pause: ${BATCH_PAUSE_MS}ms cooldown after ${done} pages`);
+        safePostMessage(port, { type: 'progress', current: done, total, message: `Cooldown (${done}/${total})...` });
+        await new Promise(r => setTimeout(r, BATCH_PAUSE_MS));
+      }
       // Throttle: give Confluence server breathing room between requests
       if (THROTTLE_MS > 0) await new Promise(r => setTimeout(r, THROTTLE_MS));
       const task = processPage(page, pageIndex, baseUrl, zip, isCloud, exportOpts)

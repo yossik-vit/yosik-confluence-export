@@ -91,6 +91,17 @@ describe('sanitizeZipPathSegment', () => {
       'Industry-integration-standards-&-needs-(US-analysis)',
     );
   });
+
+  it('preserves Cyrillic text via NFC normalization', () => {
+    assert.equal(
+      sanitizeZipPathSegment('Регламент процесса'),
+      'Регламент-процесса',
+    );
+  });
+
+  it('returns fallback for empty string', () => {
+    assert.equal(sanitizeZipPathSegment(''), 'Untitled');
+  });
 });
 
 describe('sanitizeZipFilename', () => {
@@ -197,6 +208,18 @@ describe('buildPageIndex', () => {
     assert.equal(index.get('1').zipPath, 'Space/A/Page.md');
     assert.equal(index.get('2').zipPath, 'Space/B/Page.md');
   });
+
+  it('adds sort prefixes when preserveOrder is true', () => {
+    const pages = [
+      { id: '1', title: 'Alpha', ancestors: [] },
+      { id: '2', title: 'Beta', ancestors: [] },
+      { id: '3', title: 'Gamma', ancestors: [] },
+    ];
+    const index = buildPageIndex(pages, 'Space', true);
+    assert.equal(index.get('1').zipPath, 'Space/01-Alpha.md');
+    assert.equal(index.get('2').zipPath, 'Space/02-Beta.md');
+    assert.equal(index.get('3').zipPath, 'Space/03-Gamma.md');
+  });
 });
 
 describe('computeRelativePath', () => {
@@ -225,6 +248,13 @@ describe('computeRelativePath', () => {
 
   it('returns filename for self-reference in space root', () => {
     assert.equal(computeRelativePath('Space/Page.md', 'Space/Page.md'), 'Page.md');
+  });
+
+  it('returns filename for identical nested paths', () => {
+    assert.equal(
+      computeRelativePath('Space/Home/Sub/Page.md', 'Space/Home/Sub/Page.md'),
+      'Page.md',
+    );
   });
 });
 

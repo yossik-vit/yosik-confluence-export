@@ -684,12 +684,26 @@ async function processPage(page, pageIndex, baseUrl, zip, isCloud, exportOpts) {
   const markdown = await htmlToMarkdown(html);
   log('info', `page:converted "${page.title}"`, { mdLen: markdown.length, ms: Date.now() - tc });
 
-  if (markdown.length === 0) {
-    log('error', `page:EMPTY markdown! "${page.title}"`, { htmlLen, zipPath });
+  // If Turndown returned empty (page is macro-only, e.g. folder page with child-pages list),
+  // generate a minimal page with title + links to children
+  let content = markdown;
+  if (content.length === 0) {
+    log('warn', `page:empty-content "${page.title}" — generating stub`, { htmlLen, zipPath });
+    const children = pageIndex ? Array.from(pageIndex.values()).filter(p => {
+      const parts = p.zipPath.split('/');
+      const parentFolder = parts.slice(0, -1).join('/');
+      const thisFolder = zipPath.replace(/\.md$/, '');
+      return parentFolder === thisFolder && p.zipPath !== zipPath;
+    }) : [];
+    if (children.length > 0) {
+      content = `# ${page.title}\n\n` + children.map(c => `- [[${c.title}]]`).join('\n') + '\n';
+    } else {
+      content = `# ${page.title}\n`;
+    }
   }
 
   const frontmatter = generateFrontmatter(page, meta);
-  zip.file(zipPath, frontmatter + markdown);
+  zip.file(zipPath, frontmatter + content);
 
   // Save to cache in text-only mode (fire and forget)
   if (exportOpts.skipAttachments) {

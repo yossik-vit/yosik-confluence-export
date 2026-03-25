@@ -612,7 +612,7 @@ async function downloadAttachments(html, baseUrl, zipFolderPath, zip, maxBytes) 
   }
 
   // Download attachments with limited concurrency
-  const ATTACH_CONCURRENCY = 4;
+  const ATTACH_CONCURRENCY = 1; // sequential — Confluence Server can't handle parallel attachment + content requests
   const entries = Array.from(urlsToDownload.entries());
   await limitConcurrency(entries, async ([originalUrl, { localPath }]) => {
     const absoluteUrl = originalUrl.startsWith('http')
@@ -720,9 +720,11 @@ async function exportPages(pages, pageIndex, baseUrl, zip, port, isCloud, export
   let failed = 0;
   let nextIndex = 0;
   const active = new Set();
+  // With attachments: 1 page at a time to avoid overloading Confluence
+  const concurrency = exportOpts.skipAttachments ? FETCH_CONCURRENCY : 1;
 
   async function startNext() {
-    while (active.size < FETCH_CONCURRENCY && nextIndex < pages.length) {
+    while (active.size < concurrency && nextIndex < pages.length) {
       if (exportAbort?.signal?.aborted) return;
       const page = pages[nextIndex++];
       // Throttle: give Confluence server breathing room between requests

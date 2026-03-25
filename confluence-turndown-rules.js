@@ -127,8 +127,32 @@ function addConfluenceTurndownRules(turndown) {
     },
   });
 
-  // --- Content wrappers inside table cells — unwrap to plain content ---
-  // HTML: <div class="content-wrapper"><p>Text</p></div>
+  // --- Complex Confluence tables — keep as HTML if they have merged cells ---
+  // Markdown can't represent rowspan/colspan. Obsidian renders HTML tables fine.
+  turndown.addRule('confluenceComplexTable', {
+    filter(node) {
+      if (node.nodeName !== 'TABLE') return false;
+      // Check for merged cells (rowspan or colspan > 1)
+      const cells = node.querySelectorAll('td[rowspan], td[colspan], th[rowspan], th[colspan]');
+      for (const cell of cells) {
+        const rs = parseInt(cell.getAttribute('rowspan') || '1', 10);
+        const cs = parseInt(cell.getAttribute('colspan') || '1', 10);
+        if (rs > 1 || cs > 1) return true;
+      }
+      return false;
+    },
+    replacement(_content, node) {
+      // Return cleaned HTML table — Obsidian renders it natively
+      const html = node.outerHTML
+        .replace(/\s+style="[^"]*"/gi, '')
+        .replace(/\s+class="[^"]*"/gi, '')
+        .replace(/\s+data-[a-z-]+="[^"]*"/gi, '');
+      return `\n\n${html}\n\n`;
+    },
+  });
+
+  // --- Simple Confluence tables — unwrap helpers for GFM conversion ---
+  // Content wrappers inside table cells
   turndown.addRule('confluenceContentWrapper', {
     filter(node) {
       return (
@@ -141,8 +165,7 @@ function addConfluenceTurndownRules(turndown) {
     },
   });
 
-  // --- Confluence table wrapper — strip wrapper, let GFM handle the table ---
-  // HTML: <div class="table-wrap"><table class="confluenceTable">...</table></div>
+  // Table wrapper div
   turndown.addRule('confluenceTableWrapper', {
     filter(node) {
       return (

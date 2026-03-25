@@ -66,6 +66,7 @@ function triggerAnchorDownload(base64, filename) {
 }
 
 let pendingChunks = [];
+const MAX_PENDING_CHUNKS = 100;
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.action === 'ping') {
@@ -73,6 +74,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
   if (msg.action === 'blob-chunk') {
+    if (pendingChunks.length >= MAX_PENDING_CHUNKS) {
+      pendingChunks = [];
+    }
     pendingChunks.push(msg.chunk);
     sendResponse({ ok: true });
     return true;

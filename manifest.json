@@ -5,6 +5,9 @@
   "description": "Export Confluence pages to Obsidian-compatible Markdown. Single page, selective, or full space export.",
   "permissions": ["activeTab", "offscreen", "scripting", "storage", "alarms"],
   "host_permissions": ["<all_urls>"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  },
   "action": {
     "default_popup": "popup.html",
     "default_title": "Yosik Confluence Export"

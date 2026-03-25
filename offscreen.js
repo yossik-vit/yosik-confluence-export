@@ -11,6 +11,31 @@ const turndown = (() => {
   return td;
 })();
 
+function normalizeTable(rows) {
+  // Count max columns
+  const maxCols = Math.max(...rows.map(r => r.split('|').length - 2));
+  if (maxCols < 2) return rows; // Not a real table
+
+  // Ensure separator row exists (row index 1)
+  const hasSeparator = rows.length > 1 && /^\s*\|[\s-:|]+\|/.test(rows[1]);
+
+  const result = [];
+  for (let i = 0; i < rows.length; i++) {
+    const cells = rows[i].split('|').slice(1, -1); // Remove first/last empty
+    // Pad to maxCols
+    while (cells.length < maxCols) cells.push(' ');
+    result.push('| ' + cells.join(' | ') + ' |');
+  }
+
+  // Insert separator if missing
+  if (!hasSeparator && result.length > 0) {
+    const sep = '| ' + Array(maxCols).fill('---').join(' | ') + ' |';
+    result.splice(1, 0, sep);
+  }
+
+  return result;
+}
+
 function fixMarkdownTables(md) {
   const lines = md.split('\n');
   const result = [];
@@ -25,7 +50,28 @@ function fixMarkdownTables(md) {
     }
     result.push(line);
   }
-  return result.join('\n');
+
+  // Normalize table column counts: find table blocks and pad short rows
+  const normalized = [];
+  let tableBlock = [];
+
+  for (const line of result) {
+    const isTableRow = line.trimStart().startsWith('|') && line.trimEnd().endsWith('|') && line.includes('|', 1);
+    if (isTableRow) {
+      tableBlock.push(line);
+    } else {
+      if (tableBlock.length > 0) {
+        normalized.push(...normalizeTable(tableBlock));
+        tableBlock = [];
+      }
+      normalized.push(line);
+    }
+  }
+  if (tableBlock.length > 0) {
+    normalized.push(...normalizeTable(tableBlock));
+  }
+
+  return normalized.join('\n');
 }
 
 // Port-based: background sends {id, html}, we reply {id, markdown}

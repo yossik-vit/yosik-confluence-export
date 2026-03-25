@@ -90,8 +90,8 @@ function buildPageIndex(pages, rootFolder, preserveOrder) {
     // Optional sort prefix: "01-Title.md"
     let filename;
     if (preserveOrder && siblingOrder.has(page.id)) {
-      const order = siblingOrder.get(page.id);
-      const prefix = String(order + 1).padStart(2, '0');
+      // Folder notes (parent pages) get 00- to sort first in their folder
+      const prefix = isParent ? '00' : String(siblingOrder.get(page.id) + 1).padStart(2, '0');
       filename = `${prefix}-${pageToFilename(page.title)}`;
     } else {
       filename = pageToFilename(page.title);

@@ -178,6 +178,30 @@ function addConfluenceTurndownRules(turndown) {
     },
   });
 
+  // --- Confluence plugin content (servlet images/iframes) → placeholder ---
+  turndown.addRule('confluencePlugin', {
+    filter(node) {
+      if (node.nodeName === 'IMG' || node.nodeName === 'IFRAME') {
+        const src = node.getAttribute('src') || '';
+        return src.includes('/plugins/servlet/');
+      }
+      return false;
+    },
+    replacement() {
+      return '*[Confluence plugin]*';
+    },
+  });
+
+  // --- Images → placeholder (attachments are not downloaded) ---
+  turndown.addRule('imagePlaceholder', {
+    filter: 'img',
+    replacement(_content, node) {
+      const alt = node.getAttribute('alt') || '';
+      if (alt) return `*[img: ${alt}]*`;
+      return '*[img]*';
+    },
+  });
+
   // --- User mentions → @name ---
   // HTML: <a class="confluence-userlink" data-username="jdoe">John Doe</a>
   turndown.addRule('confluenceUserMention', {

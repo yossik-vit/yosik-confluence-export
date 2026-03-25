@@ -15,8 +15,6 @@ const activeThreadsEl = document.getElementById('active-threads');
 const status = document.getElementById('status');
 const spaceInfo = document.getElementById('space-info');
 const spaceNameEl = document.getElementById('space-name');
-const chkAttachments = document.getElementById('chk-attachments');
-const maxAttachmentSelect = document.getElementById('max-attachment-size');
 const chkOrder = document.getElementById('chk-order');
 const chkIncremental = document.getElementById('chk-incremental');
 
@@ -296,32 +294,21 @@ btnDeselectAll.addEventListener('click', () => {
 
 // ── Settings persistence ────────────────────────────────────────────────────
 
-function toggleAttachmentSize() {
-  maxAttachmentSelect.hidden = !chkAttachments.checked;
-}
-
 function saveSettings() {
   chrome.storage.local.set({
-    downloadAttachments: chkAttachments.checked,
-    maxAttachmentBytes: parseInt(maxAttachmentSelect.value, 10),
     preserveOrder: chkOrder.checked,
     incremental: chkIncremental.checked,
   });
 }
 
-chkAttachments.addEventListener('change', () => { toggleAttachmentSize(); saveSettings(); });
-maxAttachmentSelect.addEventListener('change', saveSettings);
 chkOrder.addEventListener('change', saveSettings);
 chkIncremental.addEventListener('change', saveSettings);
 
 (async () => {
   try {
-    const data = await chrome.storage.local.get(['downloadAttachments', 'maxAttachmentBytes', 'preserveOrder', 'incremental']);
-    if (data.downloadAttachments === true) chkAttachments.checked = true;
-    if (data.maxAttachmentBytes !== undefined) maxAttachmentSelect.value = String(data.maxAttachmentBytes);
+    const data = await chrome.storage.local.get(['preserveOrder', 'incremental']);
     if (data.preserveOrder === true) chkOrder.checked = true;
     if (data.incremental === true) chkIncremental.checked = true;
-    toggleAttachmentSize();
   } catch { /* ignore */ }
 })();
 
@@ -377,7 +364,6 @@ function handlePortMessage(msg) {
 const PHASE_LABELS = {
   fetching: '\u{1F4E5} fetch',
   converting: '\u{1F504} md',
-  attachments: '\u{1F4CE} img',
 };
 
 function renderThreads(threads) {
@@ -436,8 +422,7 @@ btnExport.addEventListener('click', async () => {
     tabId: tab?.id,
     tabUrl: tab?.url,
     pageIds: Array.from(selectedPageIds),
-    skipAttachments: !chkAttachments.checked,
-    maxAttachmentBytes: chkAttachments.checked ? (parseInt(maxAttachmentSelect.value, 10) || 0) : 0,
+    skipAttachments: true,
     preserveOrder: chkOrder.checked,
     incremental: chkIncremental.checked,
   });

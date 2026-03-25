@@ -68,9 +68,6 @@
         <input id="chk-incremental" type="checkbox" class="tree-checkbox" />
         <span>Только изменённые с последнего экспорта</span>
       </label>
-      <!-- Attachments removed: Confluence Server can't handle bulk export with attachments -->
-      <input id="chk-attachments" type="hidden" />
-      <input id="max-attachment-size" type="hidden" value="0" />
       <label class="checkbox-row">
         <input id="chk-order" type="checkbox" class="tree-checkbox" />
         <span>Нумерация для сортировки (01-, 02-...)</span>
@@ -93,7 +90,6 @@
     <footer class="footer">
       <span>Obsidian-compatible Markdown</span>
       <span class="dot"></span>
-      <!-- TODO: detect Cloud vs Server -->
       <span id="footer-api-type">Confluence Server</span>
       <button id="btn-logs" class="btn-logs" title="Copy debug logs" aria-label="Copy debug logs">logs</button>
     </footer>

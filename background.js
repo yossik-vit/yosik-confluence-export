@@ -59,6 +59,8 @@ async function setCachedPage(pageId, version, markdown, frontmatter) {
 
 // ── Debug log ───────────────────────────────────────────────────────────────
 
+const DEBUG = false; // set to true for development
+
 const LOG_MAX = 2000;
 const logBuffer = [];
 
@@ -71,15 +73,14 @@ function log(level, msg, data) {
   };
   logBuffer.push(entry);
   if (logBuffer.length > LOG_MAX) logBuffer.shift();
-  if (level === 'error') {
-    console.error(`[yosik] ${msg}`, data ?? '');
-  } else {
-    console.log(`[yosik] ${msg}`, data ?? '');
+  if (DEBUG) {
+    if (level === 'error') console.error(`[yosik] ${msg}`, data ?? '');
+    else console.log(`[yosik] ${msg}`, data ?? '');
   }
 }
 
 const PAGE_LIMIT = 50;
-const ZIP_CHUNK_SIZE = 1000; // text-only exports fit in one ZIP; chunking only for huge spaces with attachments
+const ZIP_CHUNK_SIZE = 1000; // one ZIP for most exports; chunking for 1000+ pages
 const FETCH_CONCURRENCY = 2;
 const FETCH_TIMEOUT_MS = 60000;
 const THROTTLE_MS = 200; // pause between page fetches to avoid overloading Confluence

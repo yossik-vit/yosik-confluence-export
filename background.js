@@ -24,6 +24,7 @@ function log(level, msg, data) {
 }
 
 const PAGE_LIMIT = 50;
+const ZIP_CHUNK_SIZE = 200;
 const FETCH_CONCURRENCY = 5;
 const FETCH_TIMEOUT_MS = 30000;
 const ATTACH_TIMEOUT_MS = 10000;
@@ -694,6 +695,45 @@ async function saveLastExportDate(spaceKey) {
   }
 }
 
+// ── Chunked export helper ───────────────────────────────────────────────────
+
+async function exportChunked(pages, allPages, pageIndex, baseUrl, spaceName, safeName, zipBaseName, port, isCloud, opts) {
+  const chunks = [];
+  for (let i = 0; i < pages.length; i += ZIP_CHUNK_SIZE) {
+    chunks.push(pages.slice(i, i + ZIP_CHUNK_SIZE));
+  }
+  const totalChunks = chunks.length;
+  let globalDone = 0;
+  let totalSkipped = 0;
+
+  for (let c = 0; c < totalChunks; c++) {
+    if (exportAbort?.signal?.aborted) throw new Error('Export cancelled.');
+    const chunk = chunks[c];
+    const zip = new JSZip();
+
+    // Add MOC only in first chunk
+    if (c === 0) {
+      const tree = buildTreeFromPages(allPages);
+      zip.file(`${safeName}/_index.md`, generateMOC(tree, spaceName));
+    }
+
+    const chunkLabel = totalChunks > 1 ? ` (part ${c + 1}/${totalChunks})` : '';
+    safePostMessage(port, { type: 'progress', message: `Exporting pages${chunkLabel}...`, current: globalDone, total: pages.length });
+
+    const skipped = await exportPages(chunk, pageIndex, baseUrl, zip, port, isCloud, opts, globalDone, pages.length);
+    globalDone += chunk.length;
+    totalSkipped += skipped;
+
+    const filename = totalChunks > 1
+      ? `${zipBaseName.replace('.zip', '')}-${c + 1}.zip`
+      : zipBaseName;
+    safePostMessage(port, { type: 'progress', message: `Building zip${chunkLabel}...` });
+    await triggerDownload(zip, filename);
+  }
+
+  return totalSkipped;
+}
+
 // ── Export: Full space ──────────────────────────────────────────────────────
 
 const KEEPALIVE_INTERVAL_MS = 25000;
@@ -758,18 +798,10 @@ async function runExport(port, tabId, tabUrl, opts, incremental) {
         // Build index with all pages for correct paths
         const safeName = sanitizeSpaceName(spaceName);
         const pageIndex = buildPageIndex(allPages, safeName, opts.preserveOrder);
-        const tree = buildTreeFromPages(allPages);
 
         await ensureOffscreenDocument();
-        const zip = new JSZip();
 
-        zip.file(`${safeName}/_index.md`, generateMOC(tree, spaceName));
-
-        safePostMessage(port, { type: 'progress', message: `Exporting${incrementalLabel}...`, current: 0, total: pages.length });
-        const skipped = await exportPages(pages, pageIndex, baseUrl, zip, port, isCloud, opts, 0, pages.length);
-
-        safePostMessage(port, { type: 'progress', message: 'Building zip...' });
-        await triggerDownload(zip, `${safeName}-incremental.zip`);
+        const skipped = await exportChunked(pages, allPages, pageIndex, baseUrl, spaceName, safeName, `${safeName}-incremental.zip`, port, isCloud, opts);
         await saveLastExportDate(spaceKey);
         safePostMessage(port, { type: 'done', message: doneMessage(pages.length, skipped) + incrementalLabel });
         return;
@@ -778,19 +810,10 @@ async function runExport(port, tabId, tabUrl, opts, incremental) {
 
     const safeName = sanitizeSpaceName(spaceName);
     const pageIndex = buildPageIndex(pages, safeName, opts.preserveOrder);
-    const tree = buildTreeFromPages(pages);
 
     await ensureOffscreenDocument();
 
-    const zip = new JSZip();
-
-    zip.file(`${safeName}/_index.md`, generateMOC(tree, spaceName));
-
-    safePostMessage(port, { type: 'progress', message: 'Exporting pages...', current: 0, total: pages.length });
-    const skipped = await exportPages(pages, pageIndex, baseUrl, zip, port, isCloud, opts, 0, pages.length);
-
-    safePostMessage(port, { type: 'progress', message: 'Building zip...' });
-    await triggerDownload(zip, `${safeName}.zip`);
+    const skipped = await exportChunked(pages, pages, pageIndex, baseUrl, spaceName, safeName, `${safeName}.zip`, port, isCloud, opts);
     await saveLastExportDate(spaceKey);
 
     safePostMessage(port, { type: 'done', message: doneMessage(pages.length, skipped) });
@@ -902,14 +925,10 @@ async function runExportSelected(port, tabId, tabUrl, pageIds, opts) {
 
     await ensureOffscreenDocument();
 
-    const zip = new JSZip();
-    safePostMessage(port, { type: 'progress', message: `Exporting${incrementalLabel}...`, current: 0, total: selectedPages.length });
-    const skipped = await exportPages(selectedPages, pageIndex, baseUrl, zip, port, isCloud, opts, 0, selectedPages.length);
-
     const zipName = selectedPages.length === allPages.length ? `${safeName}.zip` : `${safeName}-selected.zip`;
-    await triggerDownload(zip, zipName);
+    const skipped = await exportChunked(selectedPages, allPages, pageIndex, baseUrl, spaceName, safeName, zipName, port, isCloud, opts);
     await saveLastExportDate(spaceKey);
-    safePostMessage(port, { type: 'done', message: doneMessage(selectedPages.length, skipped) });
+    safePostMessage(port, { type: 'done', message: doneMessage(selectedPages.length, skipped) + incrementalLabel });
   } catch (err) {
     safePostMessage(port, { type: 'error', message: err.message });
   } finally {

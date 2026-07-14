@@ -9,7 +9,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
-    "eslint": "^10.6.0",
+    "eslint": "^10.7.0",
     "jszip": "^3.10.1"
   }
 }
